@@ -1,4 +1,4 @@
-﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -315,9 +315,14 @@ export interface SonoffEwelink {
         transitionTime: number;
         dimmingLightRate: number;
         programmableStepperSequence: number[];
+        illuminationCompensationOffset: number;
+        occupancyZoneConfig: number[];
+        occupancyZoneState: number;
+        occupancyZoneEnable: number;
     };
     commands: {
         protocolData: {data: number[]};
+        spaceLearning: {data: number[]};
     };
     commandResponses: never;
 }
@@ -347,6 +352,10 @@ const sonoffExtend = {
                 detachRelayMode: {name: "detachRelayMode", ID: 0x0017, type: Zcl.DataType.BOOLEAN, write: true},
                 deviceWorkMode: {name: "deviceWorkMode", ID: 0x0018, type: Zcl.DataType.UINT8, write: true, max: 0xff},
                 detachRelayMode2: {name: "detachRelayMode2", ID: 0x0019, type: Zcl.DataType.BITMAP8, write: true},
+                occupancyZoneConfig: {name: "occupancyZoneConfig", ID: 0x2014, type: Zcl.DataType.ARRAY, write: true},
+                occupancyZoneState: {name: "occupancyZoneState", ID: 0x2015, type: Zcl.DataType.BITMAP16, write: true},
+                occupancyZoneEnable: {name: "occupancyZoneEnable", ID: 0x2016, type: Zcl.DataType.BITMAP16, write: true},
+                illuminationCompensationOffset: {name: "illuminationCompensationOffset", ID: 0x2018, type: Zcl.DataType.INT16, write: true, min: -1000, max: 1000},
                 motorTravelCalibrationAction: {name: "motorTravelCalibrationAction", ID: 0x5001, type: Zcl.DataType.UINT8, write: true, max: 0xff},
                 lackWaterCloseValveTimeout: {name: "lackWaterCloseValveTimeout", ID: 0x5011, type: Zcl.DataType.UINT16, write: true, max: 0xffff},
                 motorTravelCalibrationStatus: {name: "motorTravelCalibrationStatus", ID: 0x5012, type: Zcl.DataType.UINT8, write: true, max: 0xff},
@@ -368,9 +377,302 @@ const sonoffExtend = {
             },
             commands: {
                 protocolData: {name: "protocolData", ID: 0x01, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
+                spaceLearning: {name: "spaceLearning", ID: 0x04, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
             },
             commandsResponse: {},
         });
+    },
+    occupancyZoneState(deviceZoneCount: number, zoneStep: number, mergeFirstTwoZone = false): ModernExtend {
+        const exposedZoneCount = mergeFirstTwoZone ? deviceZoneCount - 1 : deviceZoneCount;
+
+        // Generate interval distance description
+        const getZoneRange = (zoneIndex: number): string => {
+            if (mergeFirstTwoZone) {
+                if (zoneIndex === 0) {
+                    // Zone 1
+                    return `0m-${zoneStep * 2}m`;
+                }
+                // zone 2~N
+                const start = zoneStep * 2 + (zoneIndex - 1) * zoneStep;
+                const end = start + zoneStep;
+                return `${start}m-${end}m`;
+            }
+            const start = zoneIndex * zoneStep;
+            const end = start + zoneStep;
+            return `${start}m-${end}m`;
+        };
+
+        const exposes = Array.from({length: exposedZoneCount}, (_, i) =>
+            e.binary(`occupancy_zone_${i + 1}`, ea.STATE, true, false).withLabel(`Zone ${i + 1} (${getZoneRange(i)})`),
+        );
+
+        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffEwelink, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: "customClusterEwelink",
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg, publish, options, meta) => {
+                    if (msg.data.occupancyZoneState === undefined && msg.data.occupancyZoneEnable === undefined) {
+                        return;
+                    }
+
+                    const stateBitmapRaw = msg.data.occupancyZoneState ?? meta.state.occupancy_zone_state_bitmap;
+                    const enableBitmapRaw = msg.data.occupancyZoneEnable ?? meta.state.occupancy_zone_enable_bitmap;
+                    const stateBitmap = utils.isNumber(stateBitmapRaw) ? stateBitmapRaw : 0;
+                    const enableBitmap = utils.isNumber(enableBitmapRaw) ? enableBitmapRaw : 0xffff;
+
+                    const result: KeyValue = {
+                        occupancy_zone_state_bitmap: stateBitmap,
+                        occupancy_zone_enable_bitmap: enableBitmap,
+                    };
+
+                    if (mergeFirstTwoZone) {
+                        // zone 1
+                        const zone1Enable = (enableBitmap & 0b11) !== 0;
+                        result["occupancy_zone_1"] = zone1Enable && (stateBitmap & 0b11) !== 0;
+                        // zone 2~N
+                        for (let i = 2; i <= deviceZoneCount; i++) {
+                            const zoneEnable = (enableBitmap & (1 << i)) !== 0;
+                            result[`occupancy_zone_${i}`] = zoneEnable && (stateBitmap & (1 << i)) !== 0;
+                        }
+                    } else {
+                        for (let i = 0; i < deviceZoneCount; i++) {
+                            const zoneEnable = (enableBitmap & (1 << i)) !== 0;
+                            result[`occupancy_zone_${i + 1}`] = zoneEnable && (stateBitmap & (1 << i)) !== 0;
+                        }
+                    }
+
+                    return result;
+                },
+            },
+        ];
+
+        return {
+            exposes,
+            fromZigbee,
+            toZigbee: [],
+            isModernExtend: true,
+        };
+    },
+    occupancyZoneEnable(deviceZoneCount: number, zoneStep: number, mergeFirstTwoZone = false): ModernExtend {
+        const exposedZoneCount = mergeFirstTwoZone ? deviceZoneCount - 1 : deviceZoneCount;
+
+        // Generate interval distance description
+        const getZoneRange = (zoneIndex: number): string => {
+            if (mergeFirstTwoZone) {
+                if (zoneIndex === 0) {
+                    return `0m-${zoneStep * 2}m`;
+                }
+                const start = zoneStep * 2 + (zoneIndex - 1) * zoneStep;
+                const end = start + zoneStep;
+                return `${start}m-${end}m`;
+            }
+            const start = zoneIndex * zoneStep;
+            const end = start + zoneStep;
+            return `${start}m-${end}m`;
+        };
+
+        const exposes = Array.from({length: exposedZoneCount}, (_, i) =>
+            e
+                .binary(`enable_occupancy_zone_${i + 1}`, ea.ALL, true, false)
+                .withLabel(`Zone ${i + 1} (${getZoneRange(i)})`)
+                .withCategory("config"),
+        );
+
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: Array.from({length: exposedZoneCount}, (_, i) => `enable_occupancy_zone_${i + 1}`),
+                convertSet: async (entity, key, value, meta) => {
+                    const zone = Number.parseInt(key.split("_").at(-1) ?? "0", 10);
+
+                    // Rebuild bitmap from current states
+                    let bitmap = 0;
+                    for (let z = 1; z <= exposedZoneCount; z++) {
+                        if (meta.state[`enable_occupancy_zone_${z}`]) {
+                            if (mergeFirstTwoZone && z === 1) {
+                                bitmap |= 0b11; // bit0 + bit1
+                            } else {
+                                const bitIndex = mergeFirstTwoZone ? z : z - 1;
+                                bitmap |= 1 << bitIndex;
+                            }
+                        }
+                    }
+
+                    // Apply current change to bitmap
+                    if (mergeFirstTwoZone && zone === 1) {
+                        if (value) {
+                            bitmap |= 0b11;
+                        } else {
+                            bitmap &= ~0b11;
+                        }
+                    } else {
+                        const bitIndex = mergeFirstTwoZone ? zone : zone - 1;
+                        if (value) {
+                            bitmap |= 1 << bitIndex;
+                        } else {
+                            bitmap &= ~(1 << bitIndex);
+                        }
+                    }
+
+                    await entity.write(
+                        "customClusterEwelink",
+                        {
+                            [0x2016]: {
+                                value: bitmap,
+                                type: Zcl.DataType.BITMAP16,
+                            },
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+
+                    return {
+                        state: {
+                            [key]: value,
+                        },
+                    };
+                },
+            },
+        ];
+
+        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffEwelink, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: "customClusterEwelink",
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg, publish, options, meta) => {
+                    if (!msg.data.occupancyZoneEnable) {
+                        return;
+                    }
+                    const bitmap = msg.data.occupancyZoneEnable;
+                    const result: KeyValue = {};
+                    if (mergeFirstTwoZone) {
+                        // zone 1
+                        result["enable_occupancy_zone_1"] = (bitmap & 0b11) !== 0;
+                        // zone 2~N
+                        for (let i = 2; i <= deviceZoneCount; i++) {
+                            result[`enable_occupancy_zone_${i}`] = (bitmap & (1 << i)) !== 0;
+                        }
+                    } else {
+                        for (let i = 0; i < deviceZoneCount; i++) {
+                            result[`enable_occupancy_zone_${i + 1}`] = (bitmap & (1 << i)) !== 0;
+                        }
+                    }
+                    return result;
+                },
+            },
+        ];
+
+        return {
+            exposes,
+            fromZigbee,
+            toZigbee,
+            isModernExtend: true,
+        };
+    },
+    spaceLearning(): ModernExtend {
+        const commandName = "spaceLearning";
+
+        const exposes = [
+            e.enum("space_learning", ea.SET, ["start_learning"]).withDescription("Start space learning calibration").withCategory("config"),
+            e.enum("space_learning_state", ea.STATE, ["Clear", "Learning", "Failed"]).withDescription("Current state of space learning"),
+        ];
+
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: ["space_learning"],
+                convertSet: async (entity, key, value, meta) => {
+                    if (value === "start_learning") {
+                        const payloadValue: number[] = [];
+                        payloadValue[0] = 0x00; // Sub cmd = 0
+
+                        // sequence (uint64_t) - timestamp
+                        const seqBuffer = Buffer.alloc(8);
+                        seqBuffer.writeBigUInt64LE(BigInt(Date.now()));
+
+                        for (let i = 0; i < seqBuffer.length; i++) {
+                            payloadValue[1 + i] = seqBuffer[i];
+                        }
+
+                        await entity.command<string, typeof commandName, SonoffEwelink>(
+                            "customClusterEwelink",
+                            commandName,
+                            {data: payloadValue},
+                            defaultResponseOptions,
+                        );
+                    }
+
+                    return {
+                        state: {
+                            space_learning_state: "Learning",
+                        },
+                    };
+                },
+            },
+        ];
+
+        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffEwelink, ["raw"]>[] = [
+            {
+                cluster: "customClusterEwelink",
+                type: ["raw"],
+                convert: (model, msg, publish, options, meta) => {
+                    const buffer = Buffer.from(msg.data);
+
+                    const cmd = buffer[2];
+                    if (![0x04].includes(cmd)) return;
+
+                    logger.warning(`SL: received msg=${JSON.stringify(msg)}`, NS);
+
+                    const subCmd = buffer[3];
+
+                    // Respond to start learning
+                    if (subCmd === 0x01) {
+                        if (buffer.length < 20) {
+                            logger.warning(`SL: subCmd=0x01 invalid payload len=${buffer.length}`, NS);
+                            return;
+                        }
+
+                        const sequence = buffer.readBigUInt64LE(4);
+                        const expectEndTime = buffer.readBigUInt64LE(12);
+
+                        logger.info(
+                            `SL: start response seq=${sequence.toString()} expect_end_time=${expectEndTime.toString()} === ${expectEndTime.toLocaleString()}`,
+                            NS,
+                        );
+
+                        return {
+                            space_learning_state: "Learning",
+                        };
+                    }
+
+                    // Result of learning
+                    if (subCmd === 0x02) {
+                        if (buffer.length < 14) {
+                            logger.warning(`SL: subCmd=0x02 invalid payload len=${buffer.length}`, NS);
+                            return;
+                        }
+
+                        const sequence = buffer.readBigUInt64LE(4);
+                        const state = buffer[12];
+                        const reason = buffer[13];
+
+                        logger.info(`SL: result seq=${sequence.toString()} state=${state} reason=${reason}`, NS);
+
+                        if (state === 0x00 && reason === 0x00) {
+                            return {space_learning_state: "Clear"};
+                        }
+
+                        return {space_learning_state: "Failed"};
+                    }
+
+                    logger.warning(`SL: unknown subCmd=0x${subCmd.toString(16).padStart(2, "0")}`, NS);
+                },
+            },
+        ];
+
+        return {
+            exposes,
+            fromZigbee,
+            toZigbee,
+            isModernExtend: true,
+        };
     },
     programmableStepperSequence(sequences: string[]): ModernExtend {
         const stepComposite = (n: number) => {
@@ -5989,5 +6291,47 @@ export const definitions: DefinitionWithExtend[] = [
             sonoffExtend.tempAndHumiHalfHourReport(),
         ],
         ota: true,
+    },
+    {
+        zigbeeModel: ["SNZB-06P24"],
+        model: "SNZB-06P24",
+        vendor: "SONOFF",
+        description: "Zigbee occupancy sensor with illuminance",
+        extend: [
+            m.illuminance(),
+            m.occupancy(),
+            m.numeric({
+                name: "occupancy_timeout",
+                cluster: 0x0406,
+                attribute: {ID: 0x0010, type: 0x21},
+                description: "Unoccupied to occupied delay",
+                valueMin: 15,
+                valueMax: 65535,
+                unit: "s",
+            }),
+            sonoffExtend.addCustomClusterEwelink(),
+            sonoffExtend.occupancyZoneState(8, 0.5, true),
+            sonoffExtend.occupancyZoneEnable(8, 0.5, true),
+            m.numeric<"customClusterEwelink", SonoffEwelink>({
+                name: "illuminance_calibration",
+                cluster: "customClusterEwelink",
+                attribute: "illuminationCompensationOffset",
+                description: "Illuminance compensation offset",
+                valueMin: -1000,
+                valueMax: 1000,
+                unit: "lx",
+                entityCategory: "config",
+            }),
+            sonoffExtend.spaceLearning(),
+        ],
+        ota: true,
+        configure: async (device, coordinatorEndpoint) => {
+            const endpoint = device.getEndpoint(1);
+            const bindClusters = ["genPowerCfg", "ssIasZone"];
+            if (endpoint) {
+                await reporting.bind(endpoint, coordinatorEndpoint, bindClusters);
+                await endpoint.read("msOccupancySensing", ["pirOToUDelay"]);
+            }
+        },
     },
 ];
