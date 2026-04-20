@@ -144,8 +144,6 @@ interface SonoffSnzb01m {
 
 interface SonoffSnzb06p24 {
     attributes: {
-        occupancyZoneConfig: number[];
-        occupancyZoneState: number;
         occupancyZoneEnable: number;
         illuminationCompensationOffset: number;
         radarSensitivitySetting: number;
@@ -382,7 +380,6 @@ const sonoffExtend = {
             },
             commands: {
                 protocolData: {name: "protocolData", ID: 0x01, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
-                spatialLearning: {name: "spatialLearning", ID: 0x04, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
             },
             commandsResponse: {},
         });
@@ -6237,8 +6234,6 @@ export const definitions: DefinitionWithExtend[] = [
                 name: "customClusterEwelink",
                 ID: 0xfc11,
                 attributes: {
-                    // occupancyZoneConfig: {name: "occupancyZoneConfig", ID: 0x2014, type: Zcl.DataType.ARRAY, write: true},
-                    // occupancyZoneState: {name: "occupancyZoneState", ID: 0x2015, type: Zcl.DataType.BITMAP16, write: true},
                     occupancyZoneEnable: {name: "occupancyZoneEnable", ID: 0x2016, type: Zcl.DataType.BITMAP16, write: true},
                     illuminationCompensationOffset: {
                         name: "illuminationCompensationOffset",
@@ -6266,17 +6261,18 @@ export const definitions: DefinitionWithExtend[] = [
             m.illuminance(),
             m.occupancy(),
             m.numeric({
-                name: "occupancy_timeout",
-                cluster: 0x0406,
-                attribute: {ID: 0x0010, type: 0x21},
+                name: "pir_o_to_u_delay",
+                label: "Occupancy timeout",
+                cluster: "msOccupancySensing",
+                attribute: "pirOToUDelay",
                 description: "Occupied to unoccupied delay",
                 valueMin: 15,
                 valueMax: 65535,
                 unit: "s",
+                entityCategory: "config",
             }),
 
             // private cluster
-            // sonoffExtend.occupancyZoneState(8, 0.5, true), // deprecated since it's hard to use
             sonoffExtend.occupancyZoneEnable(8, 0.5, true),
             m.numeric<"customClusterEwelink", SonoffSnzb06p24>({
                 name: "illuminance_calibration",
@@ -6308,6 +6304,9 @@ export const definitions: DefinitionWithExtend[] = [
             if (endpoint) {
                 await reporting.bind(endpoint, coordinatorEndpoint, bindClusters);
                 await endpoint.read("msOccupancySensing", ["pirOToUDelay"]);
+                await endpoint.read<"customClusterEwelink", SonoffSnzb06p24>("customClusterEwelink", ["occupancyZoneEnable"]).catch((error) => {
+                    logger.warning(`SNZB-06P24 configure: read occupancyZoneEnable failed, ${error}`, NS);
+                });
             }
         },
     },
