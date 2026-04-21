@@ -151,10 +151,6 @@ interface SonoffSwvzn {
         valveAbnormalState: number;
         dailyIrrigationVolume: number;
         rainDelayEndDatetime: number;
-        weatherDelayEndDatetime: number[];
-        longitude: number;
-        latitude: number;
-        weatherBasedAdjustment: number[];
         dailyIrrigationDuration: number;
         hourIrrigationVolume: number;
         hourIrrigationDuration: number;
@@ -206,21 +202,6 @@ const swvzfRespCache: Record<
 > = {};
 // SWV-ZN/ZF multi-package merge cache expiration time
 const swvzfCacheExpireTime = 5 * 1000; // 5s
-
-// Build a fromZigbee converter for attributes reported as big-endian 32-bit integers.
-const bigEndianNumericFzConvert = (name: string, attributeKey: string): Fz.Converter<string>["convert"] => {
-    return (model, msg, publish, options, meta) => {
-        if (!(attributeKey in msg.data)) {
-            return;
-        }
-
-        const rawValue = (msg.data as unknown as KeyValue)[attributeKey];
-        utils.assertNumber(rawValue);
-        return {
-            [name]: (((rawValue & 0xff) << 24) | ((rawValue & 0xff00) << 8) | ((rawValue >>> 8) & 0xff00) | ((rawValue >>> 24) & 0xff)) >>> 0,
-        };
-    };
-};
 // **************************** SWV-ZN/ZF related ↑ ****************************
 
 const fzLocal = {
@@ -1616,71 +1597,13 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    weatherDelayEndDatetime: (): ModernExtend => {
-        const exposes = [
-            e
-                .composite("weather_delay_end_datetime", "weather_delay_end_datetime", ea.STATE_GET)
-                .withDescription("Weather delay end time and trigger types. Currently only available in the eWeLink app.")
-                .withFeature(e.binary("delay_due_to_rain", ea.STATE, true, false).withDescription("Delay due to rain"))
-                .withFeature(e.binary("delay_due_to_humidity", ea.STATE, true, false).withDescription("Delay due to humidity"))
-                .withFeature(e.binary("delay_due_to_frost", ea.STATE, true, false).withDescription("Delay due to frost"))
-                .withFeature(e.text("delay_end_time", ea.STATE).withDescription("Delay end time.")),
-        ];
-
-        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["attributeReport", "readResponse"]>[] = [
-            {
-                cluster: "customClusterEwelink",
-                type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
-                    if (!msg.data.weatherDelayEndDatetime) return;
-
-                    const array = new Uint8Array(msg.data.weatherDelayEndDatetime);
-                    if (array.length < 5) return;
-
-                    const delayType = array[0];
-                    const endTimeSeconds = (array[1] << 24) | (array[2] << 16) | (array[3] << 8) | array[4];
-                    const offsetSeconds = getRuntimeLocalOffsetSeconds(endTimeSeconds + YEAR_2000_IN_UTC);
-                    const utcSeconds = deviceLocal2000ToUTCSeconds(endTimeSeconds, offsetSeconds);
-                    const endDatetimeIso = formatUtcSecondsToIsoWithOffset(utcSeconds, offsetSeconds);
-
-                    return {
-                        weather_delay_end_datetime: {
-                            delay_due_to_rain: !!(delayType & 0b001),
-                            delay_due_to_humidity: !!(delayType & 0b010),
-                            delay_due_to_frost: !!(delayType & 0b100),
-                            delay_end_time: endDatetimeIso,
-                        },
-                    };
-                },
-            },
-        ];
-
-        const toZigbee: Tz.Converter[] = [
-            {
-                key: ["weather_delay_end_datetime"],
-                convertGet: async (entity, key, meta) => {
-                    await entity.read<"customClusterEwelink", SonoffSwvzn>("customClusterEwelink", ["weatherDelayEndDatetime"]);
-                },
-            },
-        ];
-
-        return {
-            exposes,
-            fromZigbee,
-            toZigbee,
-            isModernExtend: true,
-        };
-    },
     valveAbnormalState: (): ModernExtend => {
-        const valveAbnormalStates = ["water_shortage", "water_leakage", "frost_protection", "fail_safe"];
-
         // Generate all combinations (0b0000 to 0b1111)
         const allCombinations: string[] = ["normal"];
         for (let i = 0b0001; i <= 0b1111; i++) {
             const states: string[] = [];
             if (i & 0b0001) states.push("water_shortage");
             if (i & 0b0010) states.push("water_leakage");
-            if (i & 0b0100) states.push("frost_protection");
             if (i & 0b1000) states.push("fail_safe");
             allCombinations.push(states.join(","));
         }
@@ -1702,11 +1625,9 @@ const sonoffExtend = {
                     }
 
                     const states: string[] = [];
-                    valveAbnormalStates.forEach((state, index) => {
-                        if (value & (1 << index)) {
-                            states.push(state);
-                        }
-                    });
+                    if (value & 0b0001) states.push("water_shortage");
+                    if (value & 0b0010) states.push("water_leakage");
+                    if (value & 0b1000) states.push("fail_safe");
 
                     return {
                         valve_abnormal_state: states.join(","),
@@ -1722,171 +1643,30 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    weatherBasedAdjustment: (): ModernExtend => {
-        const exposes = e
-            .composite("weather_based_adjustment", "weather_based_adjustment", ea.ALL)
-            .withDescription("Weather-based irrigation delay settings. Currently only available in the eWeLink app.")
-            .withFeature(e.binary("enable_rain_delay", ea.ALL, true, false).withDescription("Enable rain-based 24h delay"))
-            .withFeature(e.binary("enable_humidity_delay", ea.ALL, true, false).withDescription("Enable humidity-based 24h delay"))
-            .withFeature(e.binary("enable_frost_delay", ea.ALL, true, false).withDescription("Enable frost-based 24h delay"))
-            .withFeature(
-                e
-                    .numeric("rain_probability_threshold", ea.ALL)
-                    .withValueMin(10)
-                    .withValueMax(90)
-                    .withUnit("%")
-                    .withDescription("Rain probability threshold to trigger 24h delay"),
-            )
-            .withFeature(
-                e
-                    .numeric("frost_temperature_threshold", ea.ALL)
-                    .withValueMin(0)
-                    .withValueMax(10)
-                    .withUnit("°C")
-                    .withDescription("Temperature threshold to trigger 24h delay when below this value"),
-            )
-            .withFeature(
-                e
-                    .numeric("humidity_delay_threshold", ea.ALL)
-                    .withValueMin(40)
-                    .withValueMax(90)
-                    .withUnit("%")
-                    .withDescription("Humidity threshold to trigger 24h delay when exceeded"),
-            );
-
-        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["attributeReport", "readResponse"]>[] = [
-            {
-                cluster: "customClusterEwelink",
-                type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
-                    if (!msg.data.weatherBasedAdjustment) return;
-
-                    const array = new Uint8Array(msg.data.weatherBasedAdjustment);
-                    if (array.length < 4) {
-                        logger.error(`weatherBasedAdjustment invalid length=${array.length}, expected>=4`, NS);
-                        return;
-                    }
-                    const enableBits = array[0];
-
-                    return {
-                        weather_based_adjustment: {
-                            enable_rain_delay: !!(enableBits & 0b001),
-                            enable_humidity_delay: !!(enableBits & 0b100),
-                            enable_frost_delay: !!(enableBits & 0b010),
-                            rain_probability_threshold: array[1],
-                            humidity_delay_threshold: array[3],
-                            frost_temperature_threshold: array[2],
-                        },
-                    };
-                },
-            },
-        ];
-
-        const toZigbee: Tz.Converter[] = [
-            {
-                key: ["weather_based_adjustment"],
-                convertSet: async (entity, key, value, meta) => {
-                    utils.assertObject(value, key);
-
-                    const parseRequiredInt = (fieldName: string): number | undefined => {
-                        const parsed = Number(value[fieldName]);
-                        if (!Number.isInteger(parsed)) {
-                            logger.error(`weather_based_adjustment invalid ${fieldName}, expected integer.`, NS);
-                            return;
-                        }
-                        return parsed;
-                    };
-
-                    const rainThreshold = parseRequiredInt("rain_probability_threshold");
-                    const humidityThreshold = parseRequiredInt("humidity_delay_threshold");
-                    const temperatureThreshold = parseRequiredInt("frost_temperature_threshold");
-                    if (rainThreshold === undefined || humidityThreshold === undefined || temperatureThreshold === undefined) {
-                        return;
-                    }
-
-                    const array = new Uint8Array(4);
-
-                    let enableBits = 0;
-                    if (value.enable_rain_delay) enableBits |= 0b001;
-                    if (value.enable_frost_delay) enableBits |= 0b010;
-                    if (value.enable_humidity_delay) enableBits |= 0b100;
-
-                    array[0] = enableBits;
-                    array[1] = rainThreshold;
-                    array[2] = temperatureThreshold;
-                    array[3] = humidityThreshold;
-
-                    await entity.write(
-                        "customClusterEwelink",
-                        {
-                            [0x5018]: {
-                                value: {
-                                    elementType: 0x20,
-                                    elements: array,
-                                },
-                                type: 0x48,
-                            },
-                        },
-                        utils.getOptions(meta.mapped, entity),
-                    );
-
-                    return {
-                        state: {
-                            [key]: value,
-                        },
-                    };
-                },
-                convertGet: async (entity, key, meta) => {
-                    await entity.read<"customClusterEwelink", SonoffSwvzn>("customClusterEwelink", ["weatherBasedAdjustment"]);
-                },
-            },
-        ];
-
-        return {
-            exposes: [exposes],
-            fromZigbee,
-            toZigbee,
-            isModernExtend: true,
-        };
-    },
-    manualDefaultSettings: (): ModernExtend => {
+    manualDefaultSettings: (hasFlowMeter: boolean): ModernExtend => {
         const exposes = e
             .composite("manual_default_settings", "manual_default_settings", ea.ALL)
             .withDescription("Single irrigation settings")
             .withFeature(
-                e
-                    .enum("irrigation_mode", ea.ALL, ["duration", "capacity", "duration_with_interval"])
-                    .withDescription("Irrigation mode: duration, capacity, or duration with interval"),
-            )
-            .withFeature(
-                e
-                    .numeric("irrigation_total_duration", ea.ALL)
-                    .withValueMin(0)
-                    .withValueMax(719)
-                    .withUnit("min")
-                    .withDescription("Total irrigation duration"),
-            )
-            .withFeature(
                 e.numeric("irrigation_duration", ea.ALL).withValueMin(1).withValueMax(719).withUnit("min").withDescription("Irrigation duration"),
-            )
-            .withFeature(
-                e.numeric("interval_duration", ea.ALL).withValueMin(1).withValueMax(719).withUnit("min").withDescription("Irrigation interval"),
-            )
-            .withFeature(e.enum("irrigation_amount_unit", ea.ALL, ["gallon", "liter"]).withDescription("Capacity unit"))
-            .withFeature(e.numeric("irrigation_amount", ea.ALL).withValueMin(0).withValueMax(10000).withDescription("Irrigation volume"))
-            .withFeature(
-                e.numeric("fail_safe", ea.ALL).withValueMin(0).withValueMax(719).withUnit("min").withDescription("Safety protection timeout"),
             );
+        if (hasFlowMeter) {
+            exposes
+                .withFeature(e.enum("irrigation_mode", ea.ALL, ["duration", "capacity"]).withDescription("Irrigation mode: duration or capacity"))
+                .withFeature(e.enum("irrigation_amount_unit", ea.ALL, ["US gallon", "liter"]).withDescription("Capacity unit"))
+                .withFeature(e.numeric("irrigation_amount", ea.ALL).withValueMin(0).withValueMax(10000).withDescription("Irrigation volume"))
+                .withFeature(
+                    e.numeric("fail_safe", ea.ALL).withValueMin(0).withValueMax(719).withUnit("min").withDescription("Safety protection timeout"),
+                );
+        }
 
         const modeMap: {[key: string]: number} = {
             duration: 0,
             capacity: 1,
-            duration_with_interval: 2,
         };
         const modeMapReverse: {[key: number]: string} = {
             0: "duration",
             1: "capacity",
-            2: "duration_with_interval",
         };
 
         const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["attributeReport", "readResponse"]>[] = [
@@ -1904,21 +1684,23 @@ const sonoffExtend = {
                     const mode = array[0];
                     const totalDuration = (array[1] << 8) | array[2];
                     const irrigationDuration = (array[3] << 8) | array[4];
-                    const irrigationInterval = (array[5] << 8) | array[6];
                     const capacityUnit = array[7];
                     const irrigationVolume = (array[8] << 8) | array[9];
                     const safetyTimeoutLimit = (array[10] << 8) | array[11];
 
+                    const manualDefaultSettings: KeyValue = {
+                        irrigation_duration: irrigationDuration || totalDuration,
+                    };
+
+                    if (hasFlowMeter) {
+                        manualDefaultSettings.irrigation_mode = modeMapReverse[mode] ?? "duration";
+                        manualDefaultSettings.irrigation_amount_unit = capacityUnit === 0 ? "US gallon" : "liter";
+                        manualDefaultSettings.irrigation_amount = irrigationVolume;
+                        manualDefaultSettings.fail_safe = safetyTimeoutLimit;
+                    }
+
                     return {
-                        manual_default_settings: {
-                            irrigation_mode: modeMapReverse[mode] ?? "duration",
-                            irrigation_total_duration: totalDuration,
-                            irrigation_duration: irrigationDuration,
-                            interval_duration: irrigationInterval,
-                            irrigation_amount_unit: capacityUnit === 0 ? "gallon" : "liter",
-                            irrigation_amount: irrigationVolume,
-                            fail_safe: safetyTimeoutLimit,
-                        },
+                        manual_default_settings: manualDefaultSettings,
                     };
                 },
             },
@@ -1930,15 +1712,12 @@ const sonoffExtend = {
                 convertSet: async (entity, key, value, meta) => {
                     utils.assertObject(value, key);
 
-                    if (typeof value.irrigation_mode !== "string" || modeMap[value.irrigation_mode] === undefined) {
-                        logger.error(
-                            "manual_default_settings invalid irrigation_mode, expected one of: duration, capacity, duration_with_interval.",
-                            NS,
-                        );
+                    if (hasFlowMeter && (typeof value.irrigation_mode !== "string" || modeMap[value.irrigation_mode] === undefined)) {
+                        logger.error("manual_default_settings invalid irrigation_mode, expected one of: duration, capacity.", NS);
                         return;
                     }
-                    if (value.irrigation_amount_unit !== "gallon" && value.irrigation_amount_unit !== "liter") {
-                        logger.error("manual_default_settings invalid irrigation_amount_unit, expected one of: gallon, liter.", NS);
+                    if (hasFlowMeter && value.irrigation_amount_unit !== "US gallon" && value.irrigation_amount_unit !== "liter") {
+                        logger.error("manual_default_settings invalid irrigation_amount_unit, expected one of: US gallon, liter.", NS);
                         return;
                     }
 
@@ -1951,28 +1730,21 @@ const sonoffExtend = {
                         return parsed;
                     };
 
-                    const totalDuration = parseRequiredInt("irrigation_total_duration");
                     const irrigationDuration = parseRequiredInt("irrigation_duration");
-                    const irrigationInterval = parseRequiredInt("interval_duration");
-                    const irrigationVolume = parseRequiredInt("irrigation_amount");
-                    const safetyTimeoutLimit = parseRequiredInt("fail_safe");
-                    if (
-                        totalDuration === undefined ||
-                        irrigationDuration === undefined ||
-                        irrigationInterval === undefined ||
-                        irrigationVolume === undefined ||
-                        safetyTimeoutLimit === undefined
-                    ) {
+                    const irrigationInterval = 10;
+                    const irrigationVolume = hasFlowMeter ? parseRequiredInt("irrigation_amount") : 10;
+                    const safetyTimeoutLimit = hasFlowMeter ? parseRequiredInt("fail_safe") : 10;
+                    if (irrigationDuration === undefined || irrigationVolume === undefined || safetyTimeoutLimit === undefined) {
                         return;
                     }
 
-                    const mode = modeMap[value.irrigation_mode];
-                    const capacityUnit = value.irrigation_amount_unit === "gallon" ? 0 : 1;
+                    const mode = hasFlowMeter ? modeMap[value.irrigation_mode] : modeMap.duration;
+                    const capacityUnit = hasFlowMeter ? (value.irrigation_amount_unit === "US gallon" ? 0 : 1) : 1;
 
                     const array = new Uint8Array(12);
                     array[0] = mode;
-                    array[1] = (totalDuration >> 8) & 0xff;
-                    array[2] = totalDuration & 0xff;
+                    array[1] = (irrigationDuration >> 8) & 0xff;
+                    array[2] = irrigationDuration & 0xff;
                     array[3] = (irrigationDuration >> 8) & 0xff;
                     array[4] = irrigationDuration & 0xff;
                     array[5] = (irrigationInterval >> 8) & 0xff;
@@ -2101,20 +1873,31 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    irrigationScheduleStatus: (): ModernExtend => {
+    irrigationScheduleStatus: (hasFlowMeter: boolean): ModernExtend => {
         const exposes = e
             .composite("irrigation_schedule_status", "irrigation_schedule_status", ea.STATE_GET)
             .withDescription("Irrigation schedule execution status")
             .withFeature(e.enum("schedule_status", ea.STATE, ["start", "end", "running", "standby"]).withDescription("Schedule status"))
             .withFeature(e.numeric("schedule_index", ea.STATE).withDescription("Schedule index"))
             .withFeature(e.enum("schedule_type", ea.STATE, ["automatic", "manual"]).withDescription("Schedule type"))
-            .withFeature(e.enum("irrigation_mode", ea.STATE, ["duration", "capacity", "duration_with_interval"]).withDescription("Irrigation mode"))
+            .withFeature(
+                e
+                    .enum(
+                        "irrigation_mode",
+                        ea.STATE,
+                        hasFlowMeter ? ["duration", "capacity", "duration_with_interval"] : ["duration", "duration_with_interval"],
+                    )
+                    .withDescription("Irrigation mode"),
+            )
             .withFeature(e.text("start_time", ea.STATE).withDescription("Schedule start time"))
             .withFeature(e.text("expected_end_time", ea.STATE).withDescription("Expected end time"))
-            .withFeature(e.text("actual_end_time", ea.STATE).withDescription("Actual end time"))
-            .withFeature(e.enum("irrigation_amount_unit", ea.STATE, ["gallon", "liter"]).withDescription("Irrigation amount unit"))
-            .withFeature(e.numeric("expected_irrigation_amount", ea.STATE).withDescription("Expected irrigation amount"))
-            .withFeature(e.numeric("actual_irrigation_amount", ea.STATE).withDescription("Actual irrigation amount"));
+            .withFeature(e.text("actual_end_time", ea.STATE).withDescription("Actual end time"));
+        if (hasFlowMeter) {
+            exposes
+                .withFeature(e.enum("irrigation_amount_unit", ea.STATE, ["US gallon", "liter"]).withDescription("Irrigation amount unit"))
+                .withFeature(e.numeric("expected_irrigation_amount", ea.STATE).withDescription("Expected irrigation amount"))
+                .withFeature(e.numeric("actual_irrigation_amount", ea.STATE).withDescription("Actual irrigation amount"));
+        }
 
         const scheduleStatusMap = {
             start: 0x00,
@@ -2172,20 +1955,28 @@ const sonoffExtend = {
                         const expectedEndTime = (array[8] << 24) | (array[9] << 16) | (array[10] << 8) | array[11];
                         const volumeUnit = array[12];
                         const expectedVolume = (array[13] << 8) | array[14];
+                        const irrigationScheduleStatus: KeyValue = {
+                            schedule_status: scheduleStatusMapReverse[scheduleStatus],
+                            schedule_index: scheduleIndex,
+                            ...(scheduleType ? {schedule_type: scheduleType} : {}),
+                            irrigation_mode: hasFlowMeter
+                                ? (modeMap[scheduleMode] ?? "duration")
+                                : modeMap[scheduleMode] === "duration_with_interval"
+                                  ? "duration_with_interval"
+                                  : "duration",
+                            start_time: toIsoString(expectedStartTime),
+                            expected_end_time: toIsoString(expectedEndTime),
+                            actual_end_time: null,
+                        };
+
+                        if (hasFlowMeter) {
+                            irrigationScheduleStatus.irrigation_amount_unit = volumeUnit === 0 ? "US gallon" : "liter";
+                            irrigationScheduleStatus.expected_irrigation_amount = expectedVolume;
+                            irrigationScheduleStatus.actual_irrigation_amount = null;
+                        }
 
                         return {
-                            irrigation_schedule_status: {
-                                schedule_status: scheduleStatusMapReverse[scheduleStatus],
-                                schedule_index: scheduleIndex,
-                                ...(scheduleType ? {schedule_type: scheduleType} : {}),
-                                irrigation_mode: modeMap[scheduleMode] ?? "duration",
-                                start_time: toIsoString(expectedStartTime),
-                                expected_end_time: toIsoString(expectedEndTime),
-                                actual_end_time: null,
-                                irrigation_amount_unit: volumeUnit === 0 ? "gallon" : "liter",
-                                expected_irrigation_amount: expectedVolume,
-                                actual_irrigation_amount: null,
-                            },
+                            irrigation_schedule_status: irrigationScheduleStatus,
                         };
                     }
 
@@ -2204,19 +1995,28 @@ const sonoffExtend = {
                         const expectedVolume = (array[17] << 8) | array[18];
                         const actualVolume = (array[19] << 8) | array[20];
 
+                        const irrigationScheduleStatus: KeyValue = {
+                            schedule_status: scheduleStatusMapReverse[scheduleStatus] ?? "end",
+                            schedule_index: scheduleIndex,
+                            ...(scheduleType ? {schedule_type: scheduleType} : {}),
+                            irrigation_mode: hasFlowMeter
+                                ? (modeMap[scheduleMode] ?? "duration")
+                                : modeMap[scheduleMode] === "duration_with_interval"
+                                  ? "duration_with_interval"
+                                  : "duration",
+                            start_time: toIsoString(expectedStartTime),
+                            expected_end_time: toIsoString(expectedEndTime),
+                            actual_end_time: toIsoString(actualEndTime),
+                        };
+
+                        if (hasFlowMeter) {
+                            irrigationScheduleStatus.irrigation_amount_unit = volumeUnit === 0 ? "US gallon" : "liter";
+                            irrigationScheduleStatus.expected_irrigation_amount = expectedVolume;
+                            irrigationScheduleStatus.actual_irrigation_amount = actualVolume;
+                        }
+
                         return {
-                            irrigation_schedule_status: {
-                                schedule_status: scheduleStatusMapReverse[scheduleStatus] ?? "end",
-                                schedule_index: scheduleIndex,
-                                ...(scheduleType ? {schedule_type: scheduleType} : {}),
-                                irrigation_mode: modeMap[scheduleMode] ?? "duration",
-                                start_time: toIsoString(expectedStartTime),
-                                expected_end_time: toIsoString(expectedEndTime),
-                                actual_end_time: toIsoString(actualEndTime),
-                                irrigation_amount_unit: volumeUnit === 0 ? "gallon" : "liter",
-                                expected_irrigation_amount: expectedVolume,
-                                actual_irrigation_amount: actualVolume,
-                            },
+                            irrigation_schedule_status: irrigationScheduleStatus,
                         };
                     }
                 },
@@ -2245,7 +2045,6 @@ const sonoffExtend = {
             .withDescription("Valve alarm settings")
             .withFeature(e.binary("enable_alarm_water_shortage", ea.ALL, true, false).withDescription("Water shortage alarm"))
             .withFeature(e.binary("enable_alarm_water_leak", ea.ALL, true, false).withDescription("Water leak alarm"))
-            .withFeature(e.binary("enable_frost_protection", ea.ALL, true, false).withDescription("Frost protection"))
             .withFeature(e.binary("enable_water_shortage_auto_close", ea.ALL, true, false).withDescription("Auto close valve on water shortage"))
             .withFeature(e.binary("enable_water_leak_auto_close", ea.ALL, true, false).withDescription("Auto close valve on water leak"))
             .withFeature(
@@ -2263,14 +2062,6 @@ const sonoffExtend = {
                     .withValueMax(3)
                     .withUnit("min")
                     .withDescription("Water leak trigger alarm duration"),
-            )
-            .withFeature(
-                e
-                    .numeric("set_frost_temperature", ea.ALL)
-                    .withValueMin(0)
-                    .withValueMax(10)
-                    .withUnit("°C")
-                    .withDescription("Frost protection temperature"),
             );
 
         const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["attributeReport", "readResponse"]>[] = [
@@ -2291,12 +2082,10 @@ const sonoffExtend = {
                         valve_alarm_settings: {
                             enable_alarm_water_shortage: !!(enableBits & 0b00001),
                             enable_alarm_water_leak: !!(enableBits & 0b00010),
-                            enable_frost_protection: !!(enableBits & 0b00100),
                             enable_water_shortage_auto_close: !!(enableBits & 0b01000),
                             enable_water_leak_auto_close: !!(enableBits & 0b10000),
                             alarm_water_shortage_duration: array[1],
                             alarm_water_leak_duration: array[2],
-                            set_frost_temperature: array[3],
                         },
                     };
                 },
@@ -2312,7 +2101,6 @@ const sonoffExtend = {
                     let enableBits = 0;
                     if (value.enable_alarm_water_shortage) enableBits |= 0b00001;
                     if (value.enable_alarm_water_leak) enableBits |= 0b00010;
-                    if (value.enable_frost_protection) enableBits |= 0b00100;
                     if (value.enable_water_shortage_auto_close) enableBits |= 0b01000;
                     if (value.enable_water_leak_auto_close) enableBits |= 0b10000;
 
@@ -2320,7 +2108,7 @@ const sonoffExtend = {
                     array[0] = enableBits;
                     array[1] = Number(value.alarm_water_shortage_duration) || 0;
                     array[2] = Number(value.alarm_water_leak_duration) || 0;
-                    array[3] = Number(value.set_frost_temperature) || 0;
+                    array[3] = 0;
 
                     await entity.write(
                         "customClusterEwelink",
@@ -2683,7 +2471,7 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    irrigationPlanSettingsAndReport: (): ModernExtend => {
+    irrigationPlanSettingsAndReport: (hasFlowMeter: boolean): ModernExtend => {
         const clusterName = "customClusterEwelink";
         const commandId = {
             irrigationPlanSettings: 0x06,
@@ -2712,12 +2500,12 @@ const sonoffExtend = {
             capacity: 1,
             duration_with_interval: 2,
         };
-        const irrigationAmountUnitMapping: Record<number, "gallon" | "liter"> = {
-            0: "gallon",
+        const irrigationAmountUnitMapping: Record<number, "US gallon" | "liter"> = {
+            0: "US gallon",
             1: "liter",
         };
         const irrigationAmountUnitMappingReverse = {
-            gallon: 0,
+            "US gallon": 0,
             liter: 1,
         };
         const loopTypeWeekDayBitMapping = {
@@ -2744,78 +2532,95 @@ const sonoffExtend = {
             saturday: (mask & loopTypeWeekDayBitMapping.saturday) > 0,
         });
 
-        const exposes = [
-            e
-                .composite("irrigation_plan_settings", "irrigation_plan_settings", ea.STATE_SET)
-                .withDescription("Set irrigation plan")
-                .withFeature(e.numeric("plan_index", ea.SET).withValueMin(0).withValueMax(5).withDescription("Plan index"))
-                .withFeature(e.binary("enable_state", ea.SET, true, false))
-                .withFeature(e.enum("loop_type_mode", ea.SET, ["odd_days", "even_days", "day_interval", "weekdays"]))
-                .withFeature(
-                    e
-                        .numeric("loop_type_interval_days", ea.SET)
-                        .withValueMin(1)
-                        .withValueMax(30)
-                        .withDescription("Only effective when loop_type_mode is day_interval"),
-                )
-                .withFeature(
-                    e
-                        .composite("loop_type_week_days", "loop_type_week_days", ea.SET)
-                        .withDescription("Only effective when loop_type_mode is weekdays")
-                        .withFeature(e.binary("sunday", ea.SET, true, false))
-                        .withFeature(e.binary("monday", ea.SET, true, false))
-                        .withFeature(e.binary("tuesday", ea.SET, true, false))
-                        .withFeature(e.binary("wednesday", ea.SET, true, false))
-                        .withFeature(e.binary("thursday", ea.SET, true, false))
-                        .withFeature(e.binary("friday", ea.SET, true, false))
-                        .withFeature(e.binary("saturday", ea.SET, true, false)),
-                )
-                .withFeature(e.text("enable_date", ea.SET).withDescription("Enable date in local YYYY-MM-DD format."))
-                .withFeature(e.text("start_time", ea.SET).withDescription("Start time in local HH:mm format (24-hour, zero-padded)."))
-                .withFeature(e.enum("irrigation_mode", ea.SET, ["duration", "capacity", "duration_with_interval"]))
-                .withFeature(e.numeric("irrigation_total_duration", ea.SET).withValueMin(0).withValueMax(719).withUnit("min"))
-                .withFeature(e.numeric("irrigation_duration", ea.SET).withValueMin(1).withValueMax(60).withUnit("min"))
-                .withFeature(e.numeric("interval_duration", ea.SET).withValueMin(1).withValueMax(60).withUnit("min"))
-                .withFeature(e.enum("irrigation_amount_unit", ea.SET, ["gallon", "liter"]))
+        const irrigationPlanSettings = e
+            .composite("irrigation_plan_settings", "irrigation_plan_settings", ea.STATE_SET)
+            .withDescription("Set irrigation plan")
+            .withFeature(e.numeric("plan_index", ea.SET).withValueMin(0).withValueMax(5).withDescription("Plan index"))
+            .withFeature(e.binary("enable_state", ea.SET, true, false))
+            .withFeature(e.enum("loop_type_mode", ea.SET, ["odd_days", "even_days", "day_interval", "weekdays"]))
+            .withFeature(
+                e
+                    .numeric("loop_type_interval_days", ea.SET)
+                    .withValueMin(1)
+                    .withValueMax(30)
+                    .withDescription("Only effective when loop_type_mode is day_interval"),
+            )
+            .withFeature(
+                e
+                    .composite("loop_type_week_days", "loop_type_week_days", ea.SET)
+                    .withDescription("Only effective when loop_type_mode is weekdays")
+                    .withFeature(e.binary("sunday", ea.SET, true, false))
+                    .withFeature(e.binary("monday", ea.SET, true, false))
+                    .withFeature(e.binary("tuesday", ea.SET, true, false))
+                    .withFeature(e.binary("wednesday", ea.SET, true, false))
+                    .withFeature(e.binary("thursday", ea.SET, true, false))
+                    .withFeature(e.binary("friday", ea.SET, true, false))
+                    .withFeature(e.binary("saturday", ea.SET, true, false)),
+            )
+            .withFeature(e.text("enable_date", ea.SET).withDescription("Enable date in local YYYY-MM-DD format."))
+            .withFeature(e.text("start_time", ea.SET).withDescription("Start time in local HH:mm format (24-hour, zero-padded)."))
+            .withFeature(
+                e.enum(
+                    "irrigation_mode",
+                    ea.SET,
+                    hasFlowMeter ? ["duration", "capacity", "duration_with_interval"] : ["duration", "duration_with_interval"],
+                ),
+            )
+            .withFeature(e.numeric("irrigation_total_duration", ea.SET).withValueMin(0).withValueMax(719).withUnit("min"))
+            .withFeature(e.numeric("irrigation_duration", ea.SET).withValueMin(1).withValueMax(60).withUnit("min"))
+            .withFeature(e.numeric("interval_duration", ea.SET).withValueMin(1).withValueMax(60).withUnit("min"));
+        if (hasFlowMeter) {
+            irrigationPlanSettings
+                .withFeature(e.enum("irrigation_amount_unit", ea.SET, ["US gallon", "liter"]))
                 .withFeature(e.numeric("irrigation_amount", ea.SET).withValueMin(1).withValueMax(10000))
-                .withFeature(e.numeric("fail_safe", ea.SET).withValueMin(0).withValueMax(719).withUnit("min"))
-                .withFeature(
-                    e.text("create_datetime", ea.SET).withDescription("Create datetime in ISO format with timezone (e.g. YYYY-MM-DDTHH:mm:ss+08:00)"),
+                .withFeature(e.numeric("fail_safe", ea.SET).withValueMin(0).withValueMax(719).withUnit("min"));
+        }
+        irrigationPlanSettings.withFeature(
+            e.text("create_datetime", ea.SET).withDescription("Create datetime in ISO format with timezone (e.g. YYYY-MM-DDTHH:mm:ss+08:00)"),
+        );
+
+        const irrigationPlanReport = e
+            .composite("irrigation_plan_report", "irrigation_plan_report", ea.STATE)
+            .withDescription("Irrigation plan report")
+            .withFeature(e.numeric("plan_index", ea.STATE))
+            .withFeature(e.binary("enable_state", ea.STATE, true, false))
+            .withFeature(e.enum("loop_type_mode", ea.STATE, ["odd_days", "even_days", "day_interval", "weekdays"]))
+            .withFeature(e.numeric("loop_type_interval_days", ea.STATE).withDescription("Effective when loop_type_mode is day_interval"))
+            .withFeature(
+                e
+                    .composite("loop_type_week_days", "loop_type_week_days", ea.STATE)
+                    .withDescription("Effective when loop_type_mode is weekdays")
+                    .withFeature(e.binary("sunday", ea.STATE, true, false))
+                    .withFeature(e.binary("monday", ea.STATE, true, false))
+                    .withFeature(e.binary("tuesday", ea.STATE, true, false))
+                    .withFeature(e.binary("wednesday", ea.STATE, true, false))
+                    .withFeature(e.binary("thursday", ea.STATE, true, false))
+                    .withFeature(e.binary("friday", ea.STATE, true, false))
+                    .withFeature(e.binary("saturday", ea.STATE, true, false)),
+            )
+            .withFeature(e.text("enable_date", ea.STATE).withDescription("Enable date in local YYYY-MM-DD format (local day start)"))
+            .withFeature(e.text("start_time", ea.STATE).withDescription("Start time in local HH:mm format (24-hour)"))
+            .withFeature(
+                e.enum(
+                    "irrigation_mode",
+                    ea.STATE,
+                    hasFlowMeter ? ["duration", "capacity", "duration_with_interval"] : ["duration", "duration_with_interval"],
                 ),
-            e
-                .composite("irrigation_plan_report", "irrigation_plan_report", ea.STATE)
-                .withDescription("Irrigation plan report")
-                .withFeature(e.numeric("plan_index", ea.STATE))
-                .withFeature(e.binary("enable_state", ea.STATE, true, false))
-                .withFeature(e.enum("loop_type_mode", ea.STATE, ["odd_days", "even_days", "day_interval", "weekdays"]))
-                .withFeature(e.numeric("loop_type_interval_days", ea.STATE).withDescription("Effective when loop_type_mode is day_interval"))
-                .withFeature(
-                    e
-                        .composite("loop_type_week_days", "loop_type_week_days", ea.STATE)
-                        .withDescription("Effective when loop_type_mode is weekdays")
-                        .withFeature(e.binary("sunday", ea.STATE, true, false))
-                        .withFeature(e.binary("monday", ea.STATE, true, false))
-                        .withFeature(e.binary("tuesday", ea.STATE, true, false))
-                        .withFeature(e.binary("wednesday", ea.STATE, true, false))
-                        .withFeature(e.binary("thursday", ea.STATE, true, false))
-                        .withFeature(e.binary("friday", ea.STATE, true, false))
-                        .withFeature(e.binary("saturday", ea.STATE, true, false)),
-                )
-                .withFeature(e.text("enable_date", ea.STATE).withDescription("Enable date in local YYYY-MM-DD format (local day start)"))
-                .withFeature(e.text("start_time", ea.STATE).withDescription("Start time in local HH:mm format (24-hour)"))
-                .withFeature(e.enum("irrigation_mode", ea.STATE, ["duration", "capacity", "duration_with_interval"]))
-                .withFeature(e.numeric("irrigation_total_duration", ea.STATE))
-                .withFeature(e.numeric("irrigation_duration", ea.STATE))
-                .withFeature(e.numeric("interval_duration", ea.STATE))
-                .withFeature(e.enum("irrigation_amount_unit", ea.STATE, ["gallon", "liter"]))
+            )
+            .withFeature(e.numeric("irrigation_total_duration", ea.STATE))
+            .withFeature(e.numeric("irrigation_duration", ea.STATE))
+            .withFeature(e.numeric("interval_duration", ea.STATE));
+        if (hasFlowMeter) {
+            irrigationPlanReport
+                .withFeature(e.enum("irrigation_amount_unit", ea.STATE, ["US gallon", "liter"]))
                 .withFeature(e.numeric("irrigation_amount", ea.STATE))
-                .withFeature(e.numeric("fail_safe", ea.STATE))
-                .withFeature(
-                    e
-                        .text("create_datetime", ea.STATE)
-                        .withDescription("Create datetime in ISO format with timezone (e.g. YYYY-MM-DDTHH:mm:ss+08:00)"),
-                ),
-        ];
+                .withFeature(e.numeric("fail_safe", ea.STATE));
+        }
+        irrigationPlanReport.withFeature(
+            e.text("create_datetime", ea.STATE).withDescription("Create datetime in ISO format with timezone (e.g. YYYY-MM-DDTHH:mm:ss+08:00)"),
+        );
+
+        const exposes = [irrigationPlanSettings, irrigationPlanReport];
 
         const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["raw"]>[] = [
             {
@@ -2907,27 +2712,36 @@ const sonoffExtend = {
                         const createDatetimeDevice = payload.readUInt32BE(offset);
                         const createDatetimeISO = formatUtcSecondsToIsoWithOffset(createDatetimeDevice, offsetSeconds);
 
+                        const irrigationPlanReport: KeyValue = {
+                            plan_index: planIndex,
+                            enable_state: enableState === 1,
+                            loop_type_mode: loopTypeModeMapping[loopTypeMode],
+                            loop_type_interval_days: loopTypeMode === loopTypeModeMappingReverse.day_interval ? loopTypeValue : 0,
+                            loop_type_week_days:
+                                loopTypeMode === loopTypeModeMappingReverse.weekdays
+                                    ? decodeLoopTypeWeekDays(loopTypeValue)
+                                    : decodeLoopTypeWeekDays(0),
+                            enable_date: enableDate,
+                            start_time: startTime,
+                            irrigation_mode: hasFlowMeter
+                                ? (irrigationModeMapping[irrigationMode] ?? "duration")
+                                : irrigationModeMapping[irrigationMode] === "duration_with_interval"
+                                  ? "duration_with_interval"
+                                  : "duration",
+                            irrigation_total_duration: irrigationTotalDuration,
+                            irrigation_duration: irrigationDuration,
+                            interval_duration: intervalDuration,
+                            create_datetime: createDatetimeISO,
+                        };
+
+                        if (hasFlowMeter) {
+                            irrigationPlanReport.irrigation_amount_unit = irrigationAmountUnitMapping[irrigationAmountUnit];
+                            irrigationPlanReport.irrigation_amount = irrigationAmount;
+                            irrigationPlanReport.fail_safe = failSafe;
+                        }
+
                         return {
-                            irrigation_plan_report: {
-                                plan_index: planIndex,
-                                enable_state: enableState === 1,
-                                loop_type_mode: loopTypeModeMapping[loopTypeMode],
-                                loop_type_interval_days: loopTypeMode === loopTypeModeMappingReverse.day_interval ? loopTypeValue : 0,
-                                loop_type_week_days:
-                                    loopTypeMode === loopTypeModeMappingReverse.weekdays
-                                        ? decodeLoopTypeWeekDays(loopTypeValue)
-                                        : decodeLoopTypeWeekDays(0),
-                                enable_date: enableDate,
-                                start_time: startTime,
-                                irrigation_mode: irrigationModeMapping[irrigationMode],
-                                irrigation_total_duration: irrigationTotalDuration,
-                                irrigation_duration: irrigationDuration,
-                                interval_duration: intervalDuration,
-                                irrigation_amount_unit: irrigationAmountUnitMapping[irrigationAmountUnit],
-                                irrigation_amount: irrigationAmount,
-                                fail_safe: failSafe,
-                                create_datetime: createDatetimeISO,
-                            },
+                            irrigation_plan_report: irrigationPlanReport,
                         };
                     }
                 },
@@ -3023,9 +2837,17 @@ const sonoffExtend = {
                     payloadValue[i++] = enableDatetime & 0xff;
 
                     // Irrigation mode
-                    const irrigationModeKey =
-                        typeof value.irrigation_mode === "string" ? (value.irrigation_mode as keyof typeof irrigationModeMappingReverse) : "duration";
-                    const irrigationModeCode = irrigationModeMappingReverse[irrigationModeKey];
+                    let irrigationModeCode = irrigationModeMappingReverse.duration;
+                    if (hasFlowMeter) {
+                        const irrigationModeKey =
+                            typeof value.irrigation_mode === "string"
+                                ? (value.irrigation_mode as keyof typeof irrigationModeMappingReverse)
+                                : "duration";
+                        irrigationModeCode = irrigationModeMappingReverse[irrigationModeKey] ?? irrigationModeMappingReverse.duration;
+                    } else {
+                        const irrigationModeKey = value.irrigation_mode === "duration_with_interval" ? "duration_with_interval" : "duration";
+                        irrigationModeCode = irrigationModeMappingReverse[irrigationModeKey];
+                    }
                     payloadValue[i++] = irrigationModeCode & 0xff;
 
                     // Start time offset from start of local day.
@@ -3070,15 +2892,17 @@ const sonoffExtend = {
                     payloadValue[i++] = intervalDuration & 0xff;
 
                     // Irrigation amount unit
-                    const irrigationAmountUnitKey =
-                        typeof value.irrigation_amount_unit === "string"
+                    const irrigationAmountUnitKey = hasFlowMeter
+                        ? typeof value.irrigation_amount_unit === "string"
                             ? (value.irrigation_amount_unit as keyof typeof irrigationAmountUnitMappingReverse)
-                            : "gallon";
-                    const irrigationAmountUnitCode = irrigationAmountUnitMappingReverse[irrigationAmountUnitKey];
+                            : "US gallon"
+                        : "liter";
+                    const irrigationAmountUnitCode =
+                        irrigationAmountUnitMappingReverse[irrigationAmountUnitKey] ?? irrigationAmountUnitMappingReverse.liter;
                     payloadValue[i++] = irrigationAmountUnitCode & 0xff;
 
                     // Irrigation amount
-                    const irrigationAmountValue = parseIntWithDefault("irrigation_amount", 30, 1, 10000);
+                    const irrigationAmountValue = hasFlowMeter ? parseIntWithDefault("irrigation_amount", 30, 1, 10000) : 10;
                     if (irrigationAmountValue === undefined) {
                         return;
                     }
@@ -3087,7 +2911,7 @@ const sonoffExtend = {
                     payloadValue[i++] = irrigationAmount & 0xff;
 
                     // Fail-safe timeout
-                    const failSafe = parseIntWithDefault("fail_safe", 10, 0, 719);
+                    const failSafe = hasFlowMeter ? parseIntWithDefault("fail_safe", 10, 0, 719) : 10;
                     if (failSafe === undefined) {
                         return;
                     }
@@ -5629,14 +5453,10 @@ export const definitions: DefinitionWithExtend[] = [
         },
     },
     {
-        zigbeeModel: ["SWV-ZNE", "SWV-ZFE", "SWV-ZNU", "SWV-ZFU"],
-        model: "SWV-ZNE",
+        zigbeeModel: ["SWV-ZFE", "SWV-ZFU"],
+        model: "SWV-ZFE",
         vendor: "SONOFF",
-        whiteLabel: [
-            {model: "SWV-ZNU", vendor: "SONOFF", fingerprint: [{modelID: "SWV-ZNU"}]},
-            {model: "SWV-ZFE", vendor: "SONOFF", fingerprint: [{modelID: "SWV-ZFE"}]},
-            {model: "SWV-ZFU", vendor: "SONOFF", fingerprint: [{modelID: "SWV-ZFU"}]},
-        ],
+        whiteLabel: [{model: "SWV-ZFU", vendor: "SONOFF", fingerprint: [{modelID: "SWV-ZFU"}]}],
         description: "Zigbee smart water valve",
         extend: [
             m.deviceAddCustomCluster("customClusterEwelink", {
@@ -5649,10 +5469,6 @@ export const definitions: DefinitionWithExtend[] = [
                     valveAbnormalState: {name: "valveAbnormalState", ID: 0x500c, type: Zcl.DataType.UINT8},
                     dailyIrrigationVolume: {name: "dailyIrrigationVolume", ID: 0x500f, type: Zcl.DataType.UINT32},
                     rainDelayEndDatetime: {name: "rainDelayEndDatetime", ID: 0x5014, type: Zcl.DataType.UINT32},
-                    weatherDelayEndDatetime: {name: "weatherDelayEndDatetime", ID: 0x5015, type: Zcl.DataType.ARRAY},
-                    longitude: {name: "longitude", ID: 0x5016, type: Zcl.DataType.INT32, write: true},
-                    latitude: {name: "latitude", ID: 0x5017, type: Zcl.DataType.INT32, write: true},
-                    weatherBasedAdjustment: {name: "weatherBasedAdjustment", ID: 0x5018, type: Zcl.DataType.ARRAY, write: true},
                     dailyIrrigationDuration: {name: "dailyIrrigationDuration", ID: 0x501a, type: Zcl.DataType.UINT32},
                     hourIrrigationVolume: {name: "hourIrrigationVolume", ID: 0x501b, type: Zcl.DataType.UINT32},
                     hourIrrigationDuration: {name: "hourIrrigationDuration", ID: 0x501c, type: Zcl.DataType.UINT32},
@@ -5704,10 +5520,10 @@ export const definitions: DefinitionWithExtend[] = [
                 entityCategory: "config",
             }),
             sonoffExtend.valveAbnormalState(),
-            sonoffExtend.manualDefaultSettings(),
-            sonoffExtend.irrigationPlanSettingsAndReport(),
+            sonoffExtend.manualDefaultSettings(true),
+            sonoffExtend.irrigationPlanSettingsAndReport(true),
             sonoffExtend.irrigationPlanRemove(),
-            sonoffExtend.irrigationScheduleStatus(),
+            sonoffExtend.irrigationScheduleStatus(true),
             sonoffExtend.rainDelay(),
             sonoffExtend.rainDelayEndDatetime(),
             sonoffExtend.seasonalWateringAdjustment(),
@@ -5719,7 +5535,6 @@ export const definitions: DefinitionWithExtend[] = [
                 description: "Real-time irrigation duration",
                 access: "STATE_GET",
                 unit: "s",
-                fzConvert: bigEndianNumericFzConvert("real_time_irrigation_duration", "realTimeIrrigationDuration"),
             }),
             m.numeric<"customClusterEwelink", SonoffSwvzn>({
                 name: "real_time_irrigation_volume",
@@ -5728,7 +5543,6 @@ export const definitions: DefinitionWithExtend[] = [
                 description: "The amount of water irrigated in real time",
                 access: "STATE_GET",
                 unit: "L",
-                fzConvert: bigEndianNumericFzConvert("real_time_irrigation_volume", "realTimeIrrigationVolume"),
             }),
             m.numeric<"customClusterEwelink", SonoffSwvzn>({
                 name: "hour_irrigation_volume",
@@ -5763,28 +5577,6 @@ export const definitions: DefinitionWithExtend[] = [
                 unit: "min",
             }),
             sonoffExtend.readSWVZFRecord(),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "longitude",
-                cluster: "customClusterEwelink",
-                attribute: "longitude",
-                description: "Longitude coordinate used to retrieve weather information. Currently only available in the eWeLink app.",
-                access: "ALL",
-                valueMin: -180,
-                valueMax: 180,
-                unit: "°",
-            }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "latitude",
-                cluster: "customClusterEwelink",
-                attribute: "latitude",
-                description: "Latitude coordinate used to retrieve weather information. Currently only available in the eWeLink app.",
-                access: "ALL",
-                valueMin: -90,
-                valueMax: 90,
-                unit: "°",
-            }),
-            sonoffExtend.weatherBasedAdjustment(),
-            sonoffExtend.weatherDelayEndDatetime(),
         ],
         ota: true,
         configure: async (device, coordinatorEndpoint) => {
@@ -5799,9 +5591,143 @@ export const definitions: DefinitionWithExtend[] = [
                 await endpoint.read("genOnOff", ["onOff"]).catch((error) => {
                     logger.warning(`SWV-ZN read genOnOff.onOff failed: ${error}`, NS);
                 });
+            }
+        },
+    },
+    {
+        zigbeeModel: ["SWV-ZNE", "SWV-ZNU"],
+        model: "SWV-ZNE",
+        vendor: "SONOFF",
+        whiteLabel: [{model: "SWV-ZNU", vendor: "SONOFF", fingerprint: [{modelID: "SWV-ZNU"}]}],
+        description: "Zigbee smart water valve",
+        extend: [
+            m.deviceAddCustomCluster("customClusterEwelink", {
+                name: "customClusterEwelink",
+                ID: 0xfc11,
+                attributes: {
+                    childLock: {name: "childLock", ID: 0x0000, type: Zcl.DataType.BOOLEAN, write: true},
+                    realTimeIrrigationDuration: {name: "realTimeIrrigationDuration", ID: 0x5006, type: Zcl.DataType.UINT32},
+                    realTimeIrrigationVolume: {name: "realTimeIrrigationVolume", ID: 0x5007, type: Zcl.DataType.UINT32},
+                    dailyIrrigationVolume: {name: "dailyIrrigationVolume", ID: 0x500f, type: Zcl.DataType.UINT32},
+                    rainDelayEndDatetime: {name: "rainDelayEndDatetime", ID: 0x5014, type: Zcl.DataType.UINT32},
+                    dailyIrrigationDuration: {name: "dailyIrrigationDuration", ID: 0x501a, type: Zcl.DataType.UINT32},
+                    hourIrrigationVolume: {name: "hourIrrigationVolume", ID: 0x501b, type: Zcl.DataType.UINT32},
+                    hourIrrigationDuration: {name: "hourIrrigationDuration", ID: 0x501c, type: Zcl.DataType.UINT32},
+                    manualDefaultSettings: {name: "manualDefaultSettings", ID: 0x501d, type: Zcl.DataType.ARRAY, write: true},
+                    seasonalWateringAdjustment: {name: "seasonalWateringAdjustment", ID: 0x501e, type: Zcl.DataType.ARRAY, write: true},
+                    irrigationScheduleStatus: {name: "irrigationScheduleStatus", ID: 0x501f, type: Zcl.DataType.ARRAY},
+                },
+                commands: {
+                    readRecord: {name: "readRecord", ID: 0x00, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
+                    irrigationPlanSettings: {
+                        name: "irrigationPlanSettings",
+                        ID: 0x06,
+                        parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}],
+                    },
+                    irrigationPlanRemove: {
+                        name: "irrigationPlanRemove",
+                        ID: 0x07,
+                        parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}],
+                    },
+                    rainDelay: {name: "rainDelay", ID: 0x08, parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}]},
+                },
+                commandsResponse: {
+                    irrigationPlanReport: {
+                        name: "irrigationPlanReport",
+                        ID: 0x09,
+                        parameters: [{name: "data", type: Zcl.BuffaloZclDataType.LIST_UINT8}],
+                    },
+                },
+            }),
+            // official cluster
+            m.battery(),
+            m.onOff({
+                powerOnBehavior: false,
+                skipDuplicateTransaction: true,
+                configureReporting: false,
+            }),
+            m.bindCluster({cluster: "genPollCtrl", clusterType: "input"}),
+            sonoffExtend.swvznGenTimeCompatResponse(),
 
-                await endpoint.read("customClusterEwelink", [0x500c]).catch((error) => {
-                    logger.warning(`SWV-ZN read customClusterEwelink(valveAbnormalState) failed: ${error}`, NS);
+            // private attributes & commands
+            m.binary<"customClusterEwelink", SonoffSwvzn>({
+                name: "child_lock",
+                cluster: "customClusterEwelink",
+                attribute: "childLock",
+                description: "Enables/disables physical input on the device",
+                valueOn: ["LOCK", 0x01],
+                valueOff: ["UNLOCK", 0x00],
+                entityCategory: "config",
+            }),
+            sonoffExtend.manualDefaultSettings(false),
+            sonoffExtend.irrigationPlanSettingsAndReport(false),
+            sonoffExtend.irrigationPlanRemove(),
+            sonoffExtend.irrigationScheduleStatus(false),
+            sonoffExtend.rainDelay(),
+            sonoffExtend.rainDelayEndDatetime(),
+            sonoffExtend.seasonalWateringAdjustment(),
+            m.numeric<"customClusterEwelink", SonoffSwvzn>({
+                name: "real_time_irrigation_duration",
+                cluster: "customClusterEwelink",
+                attribute: "realTimeIrrigationDuration",
+                description: "Real-time irrigation duration",
+                access: "STATE_GET",
+                unit: "s",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSwvzn>({
+                name: "real_time_irrigation_volume",
+                cluster: "customClusterEwelink",
+                attribute: "realTimeIrrigationVolume",
+                description: "The amount of water irrigated in real time",
+                access: "STATE_GET",
+                unit: "L",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSwvzn>({
+                name: "hour_irrigation_volume",
+                cluster: "customClusterEwelink",
+                attribute: "hourIrrigationVolume",
+                description: "Hourly irrigation volume",
+                access: "STATE_GET",
+                unit: "L",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSwvzn>({
+                name: "hour_irrigation_duration",
+                cluster: "customClusterEwelink",
+                attribute: "hourIrrigationDuration",
+                description: "Hourly irrigation duration",
+                access: "STATE_GET",
+                unit: "min",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSwvzn>({
+                name: "daily_irrigation_volume",
+                cluster: "customClusterEwelink",
+                attribute: "dailyIrrigationVolume",
+                description: "The amount of water irrigated today",
+                access: "STATE_GET",
+                unit: "L",
+            }),
+            m.numeric<"customClusterEwelink", SonoffSwvzn>({
+                name: "daily_irrigation_duration",
+                cluster: "customClusterEwelink",
+                attribute: "dailyIrrigationDuration",
+                description: "Daily irrigation duration",
+                access: "STATE_GET",
+                unit: "min",
+            }),
+            sonoffExtend.readSWVZFRecord(),
+        ],
+        ota: true,
+        configure: async (device, coordinatorEndpoint) => {
+            const endpoint = device.getEndpoint(1);
+            if (endpoint) {
+                try {
+                    await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff"]);
+                } catch (error) {
+                    logger.warning(`SWV-ZN genOnOff bind/reporting failed, continuing without reporting: ${error}`, NS);
+                }
+
+                await endpoint.read("genOnOff", ["onOff"]).catch((error) => {
+                    logger.warning(`SWV-ZN read genOnOff.onOff failed: ${error}`, NS);
                 });
             }
         },
