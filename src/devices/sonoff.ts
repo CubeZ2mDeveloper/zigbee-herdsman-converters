@@ -149,9 +149,7 @@ interface SonoffSwvzn {
         realTimeIrrigationDuration: number;
         realTimeIrrigationVolume: number;
         valveAbnormalState: number;
-        dailyIrrigationVolume: number;
         rainDelayEndDatetime: number;
-        dailyIrrigationDuration: number;
         hourIrrigationVolume: number;
         hourIrrigationDuration: number;
         manualDefaultSettings: number[];
@@ -173,7 +171,7 @@ interface SonoffSwvzn {
 // SWV-ZN/ZF history response type
 type SonoffSwvHistoryRecord = {
     duration: number | null;
-    volume: number | null;
+    volume?: number | null;
     start: string | Date;
     end: string | Date;
 };
@@ -202,6 +200,21 @@ const swvzfRespCache: Record<
 > = {};
 // SWV-ZN/ZF multi-package merge cache expiration time
 const swvzfCacheExpireTime = 5 * 1000; // 5s
+
+// Build a fromZigbee converter for attributes reported as big-endian 32-bit integers.
+const bigEndianNumericFzConvert = (name: string, attributeKey: string): Fz.Converter<string>["convert"] => {
+    return (model, msg, publish, options, meta) => {
+        if (!(attributeKey in msg.data)) {
+            return;
+        }
+
+        const rawValue = (msg.data as unknown as KeyValue)[attributeKey];
+        utils.assertNumber(rawValue);
+        return {
+            [name]: (((rawValue & 0xff) << 24) | ((rawValue & 0xff00) << 8) | ((rawValue >>> 8) & 0xff00) | ((rawValue >>> 24) & 0xff)) >>> 0,
+        };
+    };
+};
 // **************************** SWV-ZN/ZF related ↑ ****************************
 
 const fzLocal = {
@@ -2046,7 +2059,6 @@ const sonoffExtend = {
             .withFeature(e.binary("enable_alarm_water_shortage", ea.ALL, true, false).withDescription("Water shortage alarm"))
             .withFeature(e.binary("enable_alarm_water_leak", ea.ALL, true, false).withDescription("Water leak alarm"))
             .withFeature(e.binary("enable_water_shortage_auto_close", ea.ALL, true, false).withDescription("Auto close valve on water shortage"))
-            .withFeature(e.binary("enable_water_leak_auto_close", ea.ALL, true, false).withDescription("Auto close valve on water leak"))
             .withFeature(
                 e
                     .numeric("alarm_water_shortage_duration", ea.ALL)
@@ -2083,7 +2095,6 @@ const sonoffExtend = {
                             enable_alarm_water_shortage: !!(enableBits & 0b00001),
                             enable_alarm_water_leak: !!(enableBits & 0b00010),
                             enable_water_shortage_auto_close: !!(enableBits & 0b01000),
-                            enable_water_leak_auto_close: !!(enableBits & 0b10000),
                             alarm_water_shortage_duration: array[1],
                             alarm_water_leak_duration: array[2],
                         },
@@ -2097,17 +2108,23 @@ const sonoffExtend = {
                 key: ["valve_alarm_settings"],
                 convertSet: async (entity, key, value, meta) => {
                     utils.assertObject(value, key);
+                    const state = {
+                        enable_alarm_water_shortage: !!value.enable_alarm_water_shortage,
+                        enable_alarm_water_leak: !!value.enable_alarm_water_leak,
+                        enable_water_shortage_auto_close: !!value.enable_water_shortage_auto_close,
+                        alarm_water_shortage_duration: Number(value.alarm_water_shortage_duration) || 0,
+                        alarm_water_leak_duration: Number(value.alarm_water_leak_duration) || 0,
+                    };
 
                     let enableBits = 0;
-                    if (value.enable_alarm_water_shortage) enableBits |= 0b00001;
-                    if (value.enable_alarm_water_leak) enableBits |= 0b00010;
-                    if (value.enable_water_shortage_auto_close) enableBits |= 0b01000;
-                    if (value.enable_water_leak_auto_close) enableBits |= 0b10000;
+                    if (state.enable_alarm_water_shortage) enableBits |= 0b00001;
+                    if (state.enable_alarm_water_leak) enableBits |= 0b00010;
+                    if (state.enable_water_shortage_auto_close) enableBits |= 0b01000;
 
                     const array = new Uint8Array(4);
                     array[0] = enableBits;
-                    array[1] = Number(value.alarm_water_shortage_duration) || 0;
-                    array[2] = Number(value.alarm_water_leak_duration) || 0;
+                    array[1] = state.alarm_water_shortage_duration;
+                    array[2] = state.alarm_water_leak_duration;
                     array[3] = 0;
 
                     await entity.write(
@@ -2126,7 +2143,7 @@ const sonoffExtend = {
 
                     return {
                         state: {
-                            [key]: value,
+                            [key]: state,
                         },
                     };
                 },
@@ -2143,7 +2160,7 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    readSWVZFRecord: (): ModernExtend => {
+    readSWVZFRecord: (hasFlowMeter: boolean): ModernExtend => {
         const clusterName = "customClusterEwelink";
         const commandName = "readRecord";
         const exposes = [
@@ -2152,7 +2169,11 @@ const sonoffExtend = {
             e.text("180_days_records", ea.STATE),
             e
                 .composite("read_swvzf_records", "read_swvzf_records", ea.STATE_SET)
-                .withDescription("Read irrigation water volume and duration in the past 24 hours, 30 days, and 6 months.")
+                .withDescription(
+                    hasFlowMeter
+                        ? "Read irrigation water volume and duration in the past 24 hours, 30 days, and 6 months."
+                        : "Read irrigation duration in the past 24 hours, 30 days, and 6 months.",
+                )
                 .withFeature(e.enum("type", ea.SET, ["24_hours", "30_days", "6_months"]).withDescription("Reading type"))
                 .withFeature(e.text("time_start", ea.SET).withDescription("Start time in ISO format with timezone (e.g. YYYY-MM-DDTHH:mm:ss+08:00)"))
                 .withFeature(e.text("time_end", ea.SET).withDescription("End time in ISO format with timezone (e.g. YYYY-MM-DDTHH:mm:ss+08:00)"))
@@ -2181,6 +2202,13 @@ const sonoffExtend = {
             const count = Math.floor(recordData.length / (mode === "24_hours" ? 3 : 5));
             const startSec = args.startSec;
             const dayOffset = args.dayOffset ?? 0;
+            const createHistoryRecord = (duration: number, start: string, end: string, volume: number): SonoffSwvHistoryRecord => {
+                const record: SonoffSwvHistoryRecord = {duration, start, end};
+                if (hasFlowMeter) {
+                    record.volume = volume;
+                }
+                return record;
+            };
 
             if (mode === "24_hours") {
                 let startMs = startSec * 1000;
@@ -2191,7 +2219,7 @@ const sonoffExtend = {
                     const endMs = startMs + 3600 * 1000;
                     const start = formatUtcSecondsToIsoWithOffset(Math.floor(startMs / 1000), args.offsetSeconds);
                     const end = formatUtcSecondsToIsoWithOffset(Math.floor(endMs / 1000), args.offsetSeconds);
-                    records.push({duration, volume, start, end});
+                    records.push(createHistoryRecord(duration, start, end, volume));
                     startMs = endMs;
                 }
                 return records;
@@ -2206,7 +2234,7 @@ const sonoffExtend = {
                     const endMs = startMs + 86400 * 1000;
                     const start = formatUtcSecondsToIsoWithOffset(Math.floor(startMs / 1000), args.offsetSeconds);
                     const end = formatUtcSecondsToIsoWithOffset(Math.floor(endMs / 1000), args.offsetSeconds);
-                    records.push({duration, volume, start, end});
+                    records.push(createHistoryRecord(duration, start, end, volume));
                     startMs = endMs;
                 }
                 return records;
@@ -2221,7 +2249,7 @@ const sonoffExtend = {
                     const intervalEndSec = shiftUtcSecondsByOffsetMonths(intervalStartSec, 1, args.offsetSeconds);
                     const start = formatUtcSecondsToIsoWithOffset(intervalStartSec, args.offsetSeconds);
                     const end = formatUtcSecondsToIsoWithOffset(intervalEndSec, args.offsetSeconds);
-                    records.push({duration, volume, start, end});
+                    records.push(createHistoryRecord(duration, start, end, volume));
                     intervalStartSec = intervalEndSec;
                 }
                 return records;
@@ -2966,14 +2994,20 @@ const sonoffExtend = {
         const clusterName = "customClusterEwelink";
 
         const exposes = [
-            e.numeric("irrigation_plan_remove", ea.SET).withValueMin(0).withValueMax(5).withDescription("The index of the irrigation plan to remove"),
+            e
+                .composite("irrigation_plan_remove", "irrigation_plan_remove", ea.SET)
+                .withDescription("Remove irrigation plan")
+                .withFeature(
+                    e.numeric("plan_index", ea.SET).withValueMin(0).withValueMax(5).withDescription("The index of the irrigation plan to remove"),
+                ),
         ];
 
         const toZigbee: Tz.Converter[] = [
             {
                 key: ["irrigation_plan_remove"],
                 convertSet: async (entity, key, value, meta) => {
-                    const planIndex = Number(value);
+                    utils.assertObject(value, key);
+                    const planIndex = Number(value.plan_index);
                     const data = Buffer.alloc(1);
                     data.writeUInt8(planIndex & 0xff, 0);
 
@@ -2986,7 +3020,7 @@ const sonoffExtend = {
 
                     return {
                         state: {
-                            [key]: planIndex,
+                            [key]: {plan_index: planIndex},
                             [`irrigation_plan_settings_${planIndex}`]: null, // Clear the state of deleted plans
                         },
                     };
@@ -5467,9 +5501,7 @@ export const definitions: DefinitionWithExtend[] = [
                     realTimeIrrigationDuration: {name: "realTimeIrrigationDuration", ID: 0x5006, type: Zcl.DataType.UINT32},
                     realTimeIrrigationVolume: {name: "realTimeIrrigationVolume", ID: 0x5007, type: Zcl.DataType.UINT32},
                     valveAbnormalState: {name: "valveAbnormalState", ID: 0x500c, type: Zcl.DataType.UINT8},
-                    dailyIrrigationVolume: {name: "dailyIrrigationVolume", ID: 0x500f, type: Zcl.DataType.UINT32},
                     rainDelayEndDatetime: {name: "rainDelayEndDatetime", ID: 0x5014, type: Zcl.DataType.UINT32},
-                    dailyIrrigationDuration: {name: "dailyIrrigationDuration", ID: 0x501a, type: Zcl.DataType.UINT32},
                     hourIrrigationVolume: {name: "hourIrrigationVolume", ID: 0x501b, type: Zcl.DataType.UINT32},
                     hourIrrigationDuration: {name: "hourIrrigationDuration", ID: 0x501c, type: Zcl.DataType.UINT32},
                     manualDefaultSettings: {name: "manualDefaultSettings", ID: 0x501d, type: Zcl.DataType.ARRAY, write: true},
@@ -5534,7 +5566,8 @@ export const definitions: DefinitionWithExtend[] = [
                 attribute: "realTimeIrrigationDuration",
                 description: "Real-time irrigation duration",
                 access: "STATE_GET",
-                unit: "s",
+                unit: "min",
+                fzConvert: bigEndianNumericFzConvert("real_time_irrigation_duration", "realTimeIrrigationDuration"),
             }),
             m.numeric<"customClusterEwelink", SonoffSwvzn>({
                 name: "real_time_irrigation_volume",
@@ -5543,6 +5576,7 @@ export const definitions: DefinitionWithExtend[] = [
                 description: "The amount of water irrigated in real time",
                 access: "STATE_GET",
                 unit: "L",
+                fzConvert: bigEndianNumericFzConvert("real_time_irrigation_volume", "realTimeIrrigationVolume"),
             }),
             m.numeric<"customClusterEwelink", SonoffSwvzn>({
                 name: "hour_irrigation_volume",
@@ -5560,23 +5594,7 @@ export const definitions: DefinitionWithExtend[] = [
                 access: "STATE_GET",
                 unit: "min",
             }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "daily_irrigation_volume",
-                cluster: "customClusterEwelink",
-                attribute: "dailyIrrigationVolume",
-                description: "The amount of water irrigated today",
-                access: "STATE_GET",
-                unit: "L",
-            }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "daily_irrigation_duration",
-                cluster: "customClusterEwelink",
-                attribute: "dailyIrrigationDuration",
-                description: "Daily irrigation duration",
-                access: "STATE_GET",
-                unit: "min",
-            }),
-            sonoffExtend.readSWVZFRecord(),
+            sonoffExtend.readSWVZFRecord(true),
         ],
         ota: true,
         configure: async (device, coordinatorEndpoint) => {
@@ -5607,11 +5625,7 @@ export const definitions: DefinitionWithExtend[] = [
                 attributes: {
                     childLock: {name: "childLock", ID: 0x0000, type: Zcl.DataType.BOOLEAN, write: true},
                     realTimeIrrigationDuration: {name: "realTimeIrrigationDuration", ID: 0x5006, type: Zcl.DataType.UINT32},
-                    realTimeIrrigationVolume: {name: "realTimeIrrigationVolume", ID: 0x5007, type: Zcl.DataType.UINT32},
-                    dailyIrrigationVolume: {name: "dailyIrrigationVolume", ID: 0x500f, type: Zcl.DataType.UINT32},
                     rainDelayEndDatetime: {name: "rainDelayEndDatetime", ID: 0x5014, type: Zcl.DataType.UINT32},
-                    dailyIrrigationDuration: {name: "dailyIrrigationDuration", ID: 0x501a, type: Zcl.DataType.UINT32},
-                    hourIrrigationVolume: {name: "hourIrrigationVolume", ID: 0x501b, type: Zcl.DataType.UINT32},
                     hourIrrigationDuration: {name: "hourIrrigationDuration", ID: 0x501c, type: Zcl.DataType.UINT32},
                     manualDefaultSettings: {name: "manualDefaultSettings", ID: 0x501d, type: Zcl.DataType.ARRAY, write: true},
                     seasonalWateringAdjustment: {name: "seasonalWateringAdjustment", ID: 0x501e, type: Zcl.DataType.ARRAY, write: true},
@@ -5672,23 +5686,8 @@ export const definitions: DefinitionWithExtend[] = [
                 attribute: "realTimeIrrigationDuration",
                 description: "Real-time irrigation duration",
                 access: "STATE_GET",
-                unit: "s",
-            }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "real_time_irrigation_volume",
-                cluster: "customClusterEwelink",
-                attribute: "realTimeIrrigationVolume",
-                description: "The amount of water irrigated in real time",
-                access: "STATE_GET",
-                unit: "L",
-            }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "hour_irrigation_volume",
-                cluster: "customClusterEwelink",
-                attribute: "hourIrrigationVolume",
-                description: "Hourly irrigation volume",
-                access: "STATE_GET",
-                unit: "L",
+                unit: "min",
+                fzConvert: bigEndianNumericFzConvert("real_time_irrigation_duration", "realTimeIrrigationDuration"),
             }),
             m.numeric<"customClusterEwelink", SonoffSwvzn>({
                 name: "hour_irrigation_duration",
@@ -5698,23 +5697,7 @@ export const definitions: DefinitionWithExtend[] = [
                 access: "STATE_GET",
                 unit: "min",
             }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "daily_irrigation_volume",
-                cluster: "customClusterEwelink",
-                attribute: "dailyIrrigationVolume",
-                description: "The amount of water irrigated today",
-                access: "STATE_GET",
-                unit: "L",
-            }),
-            m.numeric<"customClusterEwelink", SonoffSwvzn>({
-                name: "daily_irrigation_duration",
-                cluster: "customClusterEwelink",
-                attribute: "dailyIrrigationDuration",
-                description: "Daily irrigation duration",
-                access: "STATE_GET",
-                unit: "min",
-            }),
-            sonoffExtend.readSWVZFRecord(),
+            sonoffExtend.readSWVZFRecord(false),
         ],
         ota: true,
         configure: async (device, coordinatorEndpoint) => {
