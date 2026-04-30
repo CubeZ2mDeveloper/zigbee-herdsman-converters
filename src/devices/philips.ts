@@ -1126,6 +1126,13 @@ export const definitions: DefinitionWithExtend[] = [
         extend: [philips.m.light({colorTemp: {range: [153, 500]}, color: {modes: ["xy", "hs"], enhancedHue: true}})],
     },
     {
+        zigbeeModel: ["929003802201"],
+        model: "9290038022",
+        vendor: "Philips",
+        description: "Hue Impress outdoor wall light",
+        extend: [philips.m.light({colorTemp: {range: [153, 500]}, color: {modes: ["xy", "hs"], enhancedHue: true}})],
+    },
+    {
         zigbeeModel: ["1740193P0"],
         model: "1740193P0",
         vendor: "Philips",
@@ -2419,7 +2426,7 @@ export const definitions: DefinitionWithExtend[] = [
         extend: [philips.m.light({colorTemp: {range: [153, 500]}, color: true})],
     },
     {
-        zigbeeModel: ["LLC006"],
+        zigbeeModel: ["LLC006", "7099930PH"],
         model: "7099930PH",
         vendor: "Philips",
         description: "Hue Iris (Generation 2)",
@@ -4888,7 +4895,7 @@ export const definitions: DefinitionWithExtend[] = [
         extend: [philips.m.light({colorTemp: {range: [153, 500]}})],
     },
     {
-        zigbeeModel: ["929004610401", "929004610402", "929004610502", "929004610602", "929004610702", "929004610802"],
+        zigbeeModel: ["929004610401", "929004610402", "929004610403", "929004610502", "929004610602", "929004610702", "929004610802"],
         model: "929004610402",
         vendor: "Philips",
         description: "Hue White and Color Lightstrip Flux (3m)",
@@ -4960,7 +4967,7 @@ export const definitions: DefinitionWithExtend[] = [
         ],
     },
     {
-        zigbeeModel: ["929004276902", "929004277002", "929004277102"],
+        zigbeeModel: ["929004276902", "929004277002", "929004277004", "929004277102"],
         model: "929004276902",
         vendor: "Philips",
         description: "Hue Neon Outdoor Lightstrip (3m)",
@@ -4970,6 +4977,12 @@ export const definitions: DefinitionWithExtend[] = [
                 vendor: "Philips",
                 description: "Hue Neon Outdoor Lightstrip (5m)",
                 fingerprint: [{modelID: "929004277002"}],
+            },
+            {
+                model: "929004277004",
+                vendor: "Philips",
+                description: "Hue Neon Outdoor Lightstrip (5m)",
+                fingerprint: [{modelID: "929004277004"}],
             },
             {
                 model: "929004277102",
