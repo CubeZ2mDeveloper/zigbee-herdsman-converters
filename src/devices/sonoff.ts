@@ -151,6 +151,7 @@ interface SonoffSnzb09p {
         alarmSoundType: number;
         alarmVolumeLevel: number;
         alarmDuration: number;
+        alarmStatus: number;
         spilt: number;
     };
     commands: {
@@ -1422,6 +1423,19 @@ const fzLocal = {
             return {alarm_type: alarmType, siren_on: alarmType === "none" ? "OFF" : "ON"};
         },
     } satisfies Fz.Converter<"customClusterEwelink", SonoffSnzb09p, ["commandAlertCommand", "raw"]>,
+    snzb_09p_alarm_status: {
+        cluster: "customClusterEwelink",
+        type: ["attributeReport", "readResponse"],
+        convert: (model, msg, publish, options, meta) => {
+            const status = msg.data.alarmStatus;
+            if (status !== 0 && status !== 1 && status !== 2) {
+                return;
+            }
+
+            const alarmType = ({0: "none", 1: "manual", 2: "scene"} as const)[status as 0 | 1 | 2];
+            return {alarm_type: alarmType, siren_on: alarmType === "none" ? "OFF" : "ON"};
+        },
+    } satisfies Fz.Converter<"customClusterEwelink", SonoffSnzb09p, ["attributeReport", "readResponse"]>,
     // biome-ignore lint/style/useNamingConvention: ignored using `--suppress`
     SNZB02_temperature: {
         cluster: "msTemperatureMeasurement",
@@ -12800,6 +12814,7 @@ export const definitions: DefinitionWithExtend[] = [
                     alarmSoundType: {name: "alarmSoundType", ID: 0x2023, type: Zcl.DataType.ENUM8, write: true},
                     alarmVolumeLevel: {name: "alarmVolumeLevel", ID: 0x2024, type: Zcl.DataType.ENUM8, write: true},
                     alarmDuration: {name: "alarmDuration", ID: 0x2025, type: Zcl.DataType.UINT16, write: true},
+                    alarmStatus: {name: "alarmStatus", ID: 0x202e, type: Zcl.DataType.UINT8},
                     spilt: {name: "spilt", ID: 0x2000, type: Zcl.DataType.UINT8, write: true},
                 },
                 commands: {
@@ -12807,6 +12822,29 @@ export const definitions: DefinitionWithExtend[] = [
                 },
                 commandsResponse: {},
             }),
+            // Reading alarmStatus needs the custom cluster registered on the device, which only happens once
+            // `m.deviceAddCustomCluster` above has run its own hooks. Extend hooks run in array order, so keep
+            // this entry after it.
+            {
+                onEvent: [
+                    async (event) => {
+                        // Attempt to read the current alarm status on gateway startup, device rejoin and device announce.
+                        if (event.type !== "start" && event.type !== "deviceJoined" && event.type !== "deviceAnnounce") {
+                            return;
+                        }
+
+                        const endpoint = event.data.device.getEndpoint(1);
+                        try {
+                            await endpoint.read<"customClusterEwelink", SonoffSnzb09p>("customClusterEwelink", ["alarmStatus"], manufacturerOptions);
+                        } catch (error) {
+                            // Battery-powered device may be sleeping; swallow the error to avoid crashing the event chain,
+                            // but log it so a failed sync is traceable. The next device event will retry naturally.
+                            logger.warning(`Failed to read alarmStatus of '${event.data.device.ieeeAddr}' on '${event.type}' (${error})`, NS);
+                        }
+                    },
+                ],
+                isModernExtend: true,
+            },
             sonoffExtend.powerSupplyModeWithChangeBatteryState(),
             sonoffExtend.batteryWithPowerSupplyMode(),
             m.binary<"customClusterEwelink", SonoffSnzb09p>({
@@ -12853,6 +12891,11 @@ export const definitions: DefinitionWithExtend[] = [
                     tone_hi_lo: 0x04,
                     tone_intermittent: 0x07,
                     tone_pulse: 0x09,
+                    chime_doorbell: 0x0a,
+                    chime_classic_clock: 0x0b,
+                    chime_electronic_clock: 0x0c,
+                    chime_bright: 0x0d,
+                    chime_soft: 0x0e,
                 },
                 cluster: "customClusterEwelink",
                 attribute: "alarmSoundType",
@@ -12879,7 +12922,7 @@ export const definitions: DefinitionWithExtend[] = [
             }),
         ],
         ota: true,
-        fromZigbee: [fzLocal.snzb_09p_alert],
+        fromZigbee: [fzLocal.snzb_09p_alert, fzLocal.snzb_09p_alarm_status],
         toZigbee: [tzLocal.snzb_09p_alert],
         exposes: [
             e
