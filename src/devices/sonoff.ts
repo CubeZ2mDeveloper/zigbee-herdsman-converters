@@ -1357,6 +1357,26 @@ const withConditionalExpose = (extend: ModernExtend, predicate: (device: Zh.Devi
 const isBasicZB1GSPFirmwareAtLeast130 = (device: Zh.Device | DummyDevice): boolean =>
     utils.isDummyDevice(device) || firmwareSupportFeaturesVersion(device, "1.3.0", "BASIC-ZB1GSP", "higher");
 
+// SNZB-09P: the chime presets (0x0a-0x0e) require firmware >= 1.1.9; baseline values work on all firmware.
+const snzb09pAlarmSoundTypeLookup = {
+    siren_classic: 0x00,
+    siren_steady: 0x01,
+    siren_rising: 0x03,
+    siren_warning: 0x05,
+    siren_rapid: 0x06,
+    siren_emergency: 0x08,
+    tone_chirp: 0x02,
+    tone_hi_lo: 0x04,
+    tone_intermittent: 0x07,
+    tone_pulse: 0x09,
+    chime_doorbell: 0x0a,
+    chime_classic_clock: 0x0b,
+    chime_electronic_clock: 0x0c,
+    chime_bright: 0x0d,
+    chime_soft: 0x0e,
+};
+const SNZB09P_ALARM_SOUND_TYPE_CHIME_KEYS = ["chime_doorbell", "chime_classic_clock", "chime_electronic_clock", "chime_bright", "chime_soft"];
+
 const fzLocal = {
     key_action_event: {
         cluster: "customSonoffSnzb01m",
@@ -12829,7 +12849,17 @@ export const definitions: DefinitionWithExtend[] = [
                 onEvent: [
                     async (event) => {
                         // Attempt to read the current alarm status on gateway startup, device rejoin and device announce.
-                        if (event.type !== "start" && event.type !== "deviceJoined" && event.type !== "deviceAnnounce") {
+                        if (
+                            event.type !== "start" &&
+                            event.type !== "deviceJoined" &&
+                            event.type !== "deviceAnnounce" &&
+                            event.type !== "deviceInterview"
+                        ) {
+                            return;
+                        }
+
+                        // alarmStatus (0x202e) only exists from firmware 1.1.9; unknown firmware counts as unsupported.
+                        if (!firmwareSupportFeaturesVersion(event.data.device, "1.1.9", "SNZB-09P", "higher")) {
                             return;
                         }
 
@@ -12878,30 +12908,33 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOn: [true, 0x01],
                 valueOff: [false, 0x00],
             }),
-            m.enumLookup<"customClusterEwelink", SonoffSnzb09p>({
-                name: "alarm_sound_type",
-                lookup: {
-                    siren_classic: 0x00,
-                    siren_steady: 0x01,
-                    siren_rising: 0x03,
-                    siren_warning: 0x05,
-                    siren_rapid: 0x06,
-                    siren_emergency: 0x08,
-                    tone_chirp: 0x02,
-                    tone_hi_lo: 0x04,
-                    tone_intermittent: 0x07,
-                    tone_pulse: 0x09,
-                    chime_doorbell: 0x0a,
-                    chime_classic_clock: 0x0b,
-                    chime_electronic_clock: 0x0c,
-                    chime_bright: 0x0d,
-                    chime_soft: 0x0e,
-                },
-                cluster: "customClusterEwelink",
-                attribute: "alarmSoundType",
-                entityCategory: "config",
-                description: "Select the alarm sound preset.",
-            }),
+            {
+                ...m.enumLookup<"customClusterEwelink", SonoffSnzb09p>({
+                    name: "alarm_sound_type",
+                    lookup: snzb09pAlarmSoundTypeLookup,
+                    cluster: "customClusterEwelink",
+                    attribute: "alarmSoundType",
+                    entityCategory: "config",
+                    description: "Select the alarm sound preset.",
+                }),
+                exposes: [
+                    (device) => [
+                        e
+                            .enum(
+                                "alarm_sound_type",
+                                ea.ALL,
+                                Object.keys(snzb09pAlarmSoundTypeLookup).filter(
+                                    (key) =>
+                                        !SNZB09P_ALARM_SOUND_TYPE_CHIME_KEYS.includes(key) ||
+                                        utils.isDummyDevice(device) ||
+                                        firmwareSupportFeaturesVersion(device as Zh.Device, "1.1.9", "SNZB-09P", "higher"),
+                                ),
+                            )
+                            .withCategory("config")
+                            .withDescription("Select the alarm sound preset."),
+                    ],
+                ],
+            },
             m.enumLookup<"customClusterEwelink", SonoffSnzb09p>({
                 name: "alarm_volume_level",
                 lookup: {low: 0x00, medium: 0x01, high: 0x02, max: 0x03},
