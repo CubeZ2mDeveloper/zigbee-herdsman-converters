@@ -29,7 +29,6 @@ import type {
     Configure,
     DefinitionExposesFunction,
     DefinitionWithExtend,
-    DummyDevice,
     Expose,
     Fz,
     KeyValue,
@@ -371,26 +370,29 @@ const SWVZNEIrrigationAmountUnitToDeviceCode = (unit: unknown, device?: Zh.Devic
 /**
  * Checks whether a device firmware version supports a feature.
  * When version-gating parameters are omitted, the feature is treated as supported.
- * @param device Device whose firmware version should be checked.
  * @param targetVersion Firmware version threshold.
- * @param model Model for which the threshold applies.
  * @param type Whether the current version must be lower than, or equal to/higher than, the threshold.
  * @returns Whether the feature should be exposed.
  */
-const firmwareSupportFeaturesVersion = (device?: Zh.Device, targetVersion?: string, model?: string, type?: "lower" | "higher"): boolean => {
-    if (device === undefined || targetVersion === undefined || model === undefined || type === undefined) return true;
-    if (!device.softwareBuildID) return false;
-    if (device.modelID !== model) return true;
-    const currentParts = device.softwareBuildID.split(".").map((part) => Number(part));
-    const targetParts = targetVersion.split(".").map((part) => Number(part));
-    const length = Math.max(currentParts.length, targetParts.length);
-    for (let i = 0; i < length; i++) {
-        const currentPart = Number.isFinite(currentParts[i]) ? currentParts[i] : 0;
-        const targetPart = Number.isFinite(targetParts[i]) ? targetParts[i] : 0;
-        if (currentPart < targetPart) return type === "lower";
-        if (currentPart > targetPart) return type === "higher";
-    }
-    return type === "higher";
+const firmwareSupportFeaturesVersion = (targetVersion: string, type: "lower" | "higher"): FirmwareFeatureGate => {
+    const targetParts = targetVersion.split(".").map(Number);
+
+    return (device): boolean => {
+        if (!device.softwareBuildID) return false;
+
+        const currentParts = device.softwareBuildID.split(".").map(Number);
+        const length = Math.max(currentParts.length, targetParts.length);
+
+        for (let i = 0; i < length; i++) {
+            const currentPart = Number.isFinite(currentParts[i]) ? currentParts[i] : 0;
+            const targetPart = Number.isFinite(targetParts[i]) ? targetParts[i] : 0;
+
+            if (currentPart < targetPart) return type === "lower";
+            if (currentPart > targetPart) return type === "higher";
+        }
+
+        return type === "higher";
+    };
 };
 
 interface SonoffSnzb02ul {
@@ -1341,11 +1343,11 @@ const sendSonoffTpWgzbaScheduleReadCommand = async (entity: Zh.Endpoint | Zh.Gro
     );
 };
 
-const withConditionalExpose = (extend: ModernExtend, predicate: (device: Zh.Device | DummyDevice) => boolean): ModernExtend => {
+const withConditionalExpose = (extend: ModernExtend, predicate: FirmwareFeatureGate): ModernExtend => {
     const originalExposes = extend.exposes ?? [];
 
     const expose: DefinitionExposesFunction = (device, options) => {
-        if (!predicate(device)) return [];
+        if (utils.isDummyDevice(device) || !predicate(device)) return [];
 
         return originalExposes.flatMap((item) => (typeof item === "function" ? item(device, options) : [item]));
     };
@@ -1353,8 +1355,19 @@ const withConditionalExpose = (extend: ModernExtend, predicate: (device: Zh.Devi
     return {...extend, exposes: [expose]};
 };
 
-const isBasicZB1GSPFirmwareAtLeast130 = (device: Zh.Device | DummyDevice): boolean =>
-    utils.isDummyDevice(device) || firmwareSupportFeaturesVersion(device, "1.3.0", "BASIC-ZB1GSP", "higher");
+type FirmwareFeatureGate = (device: Zh.Device) => boolean;
+
+/**
+ * Firmware feature gates for SONOFF devices.
+ * Used to enable or keep legacy behavior based on the device firmware version.
+ */
+const featureGates = {
+    basiczb1gsp_support_output_energy: firmwareSupportFeaturesVersion("1.3.0", "higher"),
+    basiczb1gsp_legacy_read_consumption: firmwareSupportFeaturesVersion("1.3.0", "lower"),
+    basiczb1gsp_legacy_on_off_reporting: firmwareSupportFeaturesVersion("1.0.5", "lower"),
+    snzb02dr2_legacy_remote_source: firmwareSupportFeaturesVersion("1.0.5", "lower"),
+    snzb02dr2_support_remote_source: firmwareSupportFeaturesVersion("1.0.5", "higher"),
+} satisfies Record<string, FirmwareFeatureGate>;
 
 const fzLocal = {
     key_action_event: {
@@ -1585,7 +1598,6 @@ export interface SonoffEwelink {
 }
 
 const snzb02dr2ClusterName = "customSonoffSnzb02dr2";
-const snzb02dr2RemoteSourceMinFirmware = "1.0.5";
 const snzb02dr2RemoteSourceTemperatureRange = {min: -20, max: 60};
 const snzb02dr2RemoteSourceHumidityRange = {min: 0, max: 99.9};
 const snzb02dr2SensorStateLookup = {unbound: 0x00, online: 0x01, offline: 0x02, restored: 0x03} as const;
@@ -1595,71 +1607,6 @@ const snzb02dr2SourceHumidityKeys: string[] = ["source_1_humidity", "source_2_hu
 const snzb02dr2SourceTemperatureStateKeys: string[] = ["source_1_temperature_state", "source_2_temperature_state"];
 const snzb02dr2SourceHumidityStateKeys: string[] = ["source_1_humidity_state", "source_2_humidity_state"];
 const snzb02dr2SourceStateKeys: string[] = [...snzb02dr2SourceTemperatureStateKeys, ...snzb02dr2SourceHumidityStateKeys];
-
-const firmwareAtLeast = (device: Zh.Device | DummyDevice | null | undefined, targetVersion: string): boolean => {
-    if (!device) return false;
-    if (utils.isDummyDevice(device)) return true;
-    if (!device?.softwareBuildID) return false;
-    const currentParts = device.softwareBuildID.split(".").map((part) => Number(part));
-    const targetParts = targetVersion.split(".").map((part) => Number(part));
-    const length = Math.max(currentParts.length, targetParts.length);
-    for (let i = 0; i < length; i++) {
-        const currentPart = Number.isFinite(currentParts[i]) ? currentParts[i] : 0;
-        const targetPart = Number.isFinite(targetParts[i]) ? targetParts[i] : 0;
-        if (currentPart > targetPart) return true;
-        if (currentPart < targetPart) return false;
-    }
-    return true;
-};
-const snzb02dr2GateExposesByFirmware = (extend: ModernExtend, remoteSourceItems: boolean): ModernExtend => {
-    const originalExposes = extend.exposes ?? [];
-    const toZigbee = extend.toZigbee?.map((converter) => {
-        const convertSet = converter.convertSet;
-        const convertGet = converter.convertGet;
-        const assertFirmware = (key: string, meta: Tz.Meta): void => {
-            if (firmwareAtLeast(meta.device, snzb02dr2RemoteSourceMinFirmware) === remoteSourceItems) return;
-            if (remoteSourceItems) {
-                throw new Error(`SNZB-02DR2 ${key} requires firmware ${snzb02dr2RemoteSourceMinFirmware} or later`);
-            }
-            throw new Error(
-                `SNZB-02DR2 ${key} uses the legacy remote source protocol; use source_1/source_2 properties on firmware ${snzb02dr2RemoteSourceMinFirmware} or later`,
-            );
-        };
-
-        return {
-            ...converter,
-            convertSet:
-                convertSet === undefined
-                    ? undefined
-                    : async (entity: Zh.Endpoint | Zh.Group, key: string, value: unknown, meta: Tz.Meta) => {
-                          assertFirmware(key, meta);
-                          return await convertSet(entity, key, value, meta);
-                      },
-            convertGet:
-                convertGet === undefined
-                    ? undefined
-                    : async (entity: Zh.Endpoint | Zh.Group, key: string, meta: Tz.Meta) => {
-                          assertFirmware(key, meta);
-                          return await convertGet(entity, key, meta);
-                      },
-        };
-    });
-    return {
-        ...extend,
-        toZigbee,
-        exposes: [
-            (device, options) => {
-                if (firmwareAtLeast(device, snzb02dr2RemoteSourceMinFirmware) !== remoteSourceItems) return [];
-
-                const result: Expose[] = [];
-                for (const expose of originalExposes) {
-                    result.push(...(typeof expose === "function" ? expose(device, options) : [expose]));
-                }
-                return result;
-            },
-        ],
-    };
-};
 
 interface SonoffSnzb02dr2RemoteSourceItem {
     type: 0x00 | 0x01;
@@ -1917,8 +1864,6 @@ const sonoffExtend = {
                 cluster: clusterName,
                 type: ["attributeReport", "readResponse"],
                 convert: (model, msg, publish, options, meta) => {
-                    if (!firmwareAtLeast(meta.device, snzb02dr2RemoteSourceMinFirmware)) return;
-
                     const result: KeyValue = {};
                     const statusRaw = msg.data.temperatureSensorSelect;
                     if (statusRaw !== undefined && Object.values(snzb02dr2StatusLookup).includes(statusRaw as 0 | 1 | 2)) {
@@ -1971,12 +1916,6 @@ const sonoffExtend = {
             {
                 key: [...snzb02dr2SourceTemperatureKeys, ...snzb02dr2SourceHumidityKeys, ...snzb02dr2SourceStateKeys, "remote_source_status"],
                 convertSet: async (entity, key, value, meta) => {
-                    if (!firmwareAtLeast(meta.device, snzb02dr2RemoteSourceMinFirmware)) {
-                        throw new Error(
-                            `SNZB-02DR2 ${key} requires firmware ${snzb02dr2RemoteSourceMinFirmware} or later; use external_temperature/external_humidity on older firmware`,
-                        );
-                    }
-
                     const returnState: KeyValue = {};
 
                     if (key === "remote_source_status") {
@@ -2043,16 +1982,13 @@ const sonoffExtend = {
                     return {state: returnState};
                 },
                 convertGet: async (entity, key, meta) => {
-                    if (!firmwareAtLeast(meta.device, snzb02dr2RemoteSourceMinFirmware)) {
-                        throw new Error(`SNZB-02DR2 ${key} requires firmware ${snzb02dr2RemoteSourceMinFirmware} or later`);
-                    }
                     await readRemoteSource(entity);
                 },
             },
         ];
 
         return {
-            exposes: [(device) => (firmwareAtLeast(device, snzb02dr2RemoteSourceMinFirmware) ? remoteSourceExposes : [])],
+            exposes: remoteSourceExposes,
             fromZigbee,
             toZigbee,
             isModernExtend: true,
@@ -7229,39 +7165,34 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    readConsumptionRecord(clusterName: "customClusterEwelink", commandName: "readRecord", model?: string, targetVersion?: string): ModernExtend {
-        const expose: DefinitionExposesFunction = (device) =>
-            utils.isDummyDevice(device) || firmwareSupportFeaturesVersion(device as Zh.Device, targetVersion, model, "lower")
-                ? [
-                      e.text("consumption_records", ea.STATE),
-                      e.text("consumption_records_dst", ea.STATE),
-                      e
-                          .composite("read_consumption_records", "read_consumption_records", ea.SET)
-                          .withDescription("Read power-consumption history records (24h / monthly days / halfyear months).")
-                          .withFeature(
-                              e
-                                  .enum("type", ea.SET, ["get24Hours", "get30Days", "get180Days"])
-                                  .withDescription("Record type: get24Hours, get30Days or get180Days."),
-                          )
-                          .withFeature(
-                              e
-                                  .numeric("index", ea.SET)
-                                  .withValueMin(0)
-                                  .withValueMax(240)
-                                  .withValueStep(1)
-                                  .withDescription(
-                                      "Block index: 24h => 0/1/240(DST), 30d => 0/1, 180d => 0. For 24h/30d, index=0 auto-fetches block 0+1.",
-                                  ),
-                          )
-                          .withFeature(
-                              e
-                                  .numeric("offset", ea.SET)
-                                  .withValueMin(0)
-                                  .withValueMax(6)
-                                  .withDescription("Offset: 24h => 0..6(days), 30d => 0..5(months), 180d => 0."),
-                          ),
-                  ]
-                : [];
+    readConsumptionRecord(clusterName: "customClusterEwelink", commandName: "readRecord"): ModernExtend {
+        const expose: DefinitionExposesFunction = (device) => [
+            e.text("consumption_records", ea.STATE),
+            e.text("consumption_records_dst", ea.STATE),
+            e
+                .composite("read_consumption_records", "read_consumption_records", ea.SET)
+                .withDescription("Read power-consumption history records (24h / monthly days / halfyear months).")
+                .withFeature(
+                    e
+                        .enum("type", ea.SET, ["get24Hours", "get30Days", "get180Days"])
+                        .withDescription("Record type: get24Hours, get30Days or get180Days."),
+                )
+                .withFeature(
+                    e
+                        .numeric("index", ea.SET)
+                        .withValueMin(0)
+                        .withValueMax(240)
+                        .withValueStep(1)
+                        .withDescription("Block index: 24h => 0/1/240(DST), 30d => 0/1, 180d => 0. For 24h/30d, index=0 auto-fetches block 0+1."),
+                )
+                .withFeature(
+                    e
+                        .numeric("offset", ea.SET)
+                        .withValueMin(0)
+                        .withValueMax(6)
+                        .withDescription("Offset: 24h => 0..6(days), 30d => 0..5(months), 180d => 0."),
+                ),
+        ];
 
         const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffEwelink, ["raw"]>[] = [
             {
@@ -8271,8 +8202,6 @@ const sonoffExtend = {
             e.text("electricity_records", ea.STATE).withDescription("Last electricity history response as JSON."),
             e.text("all_electricity_records", ea.STATE).withDescription("Last full electricity history page response as JSON."),
         ];
-        const expose: DefinitionExposesFunction = (device) =>
-            utils.isDummyDevice(device) || firmwareSupportFeaturesVersion(device as Zh.Device, args.target, args.model, "higher") ? exposes : [];
 
         const fromZigbee: Fz.Converter<typeof clusterName, SonoffEwelink, ["raw"]>[] = [
             {
@@ -8652,7 +8581,7 @@ const sonoffExtend = {
         ];
 
         return {
-            exposes: [expose],
+            exposes: exposes,
             fromZigbee,
             toZigbee,
             isModernExtend: true,
@@ -9149,7 +9078,7 @@ export const definitions: DefinitionWithExtend[] = [
             m.temperature(),
             m.humidity(),
             m.bindCluster({cluster: "genPollCtrl", clusterType: "input"}),
-            snzb02dr2GateExposesByFirmware(
+            withConditionalExpose(
                 m.enumLookup<"customSonoffSnzb02dr2", SonoffSnzb02dr2>({
                     name: "temperature_sensor_select",
                     lookup: {internal: 0, external: 1},
@@ -9159,14 +9088,13 @@ export const definitions: DefinitionWithExtend[] = [
                     description:
                         "Data source shown on the display. Set to 'external' to enable the external display and show the values written to external_temperature and external_humidity; set to 'internal' to show the built-in sensor again.",
                     fzConvert: (model, msg, publish, options, meta) => {
-                        if (firmwareAtLeast(meta.device, snzb02dr2RemoteSourceMinFirmware)) return;
                         if (msg.data.temperatureSensorSelect === 0) return {temperature_sensor_select: "internal"};
                         if (msg.data.temperatureSensorSelect === 1) return {temperature_sensor_select: "external"};
                     },
                 }),
-                false,
+                featureGates.snzb02dr2_legacy_remote_source,
             ),
-            snzb02dr2GateExposesByFirmware(
+            withConditionalExpose(
                 m.numeric<"customSonoffSnzb02dr2", SonoffSnzb02dr2>({
                     name: "external_temperature",
                     cluster: "customSonoffSnzb02dr2",
@@ -9180,9 +9108,9 @@ export const definitions: DefinitionWithExtend[] = [
                     valueStep: 0.1,
                     unit: "°C",
                 }),
-                false,
+                featureGates.snzb02dr2_legacy_remote_source,
             ),
-            snzb02dr2GateExposesByFirmware(
+            withConditionalExpose(
                 m.numeric<"customSonoffSnzb02dr2", SonoffSnzb02dr2>({
                     name: "external_humidity",
                     cluster: "customSonoffSnzb02dr2",
@@ -9196,9 +9124,9 @@ export const definitions: DefinitionWithExtend[] = [
                     valueStep: 0.1,
                     unit: "%",
                 }),
-                false,
+                featureGates.snzb02dr2_legacy_remote_source,
             ),
-            sonoffExtend.snzb02dr2RemoteSource(),
+            withConditionalExpose(sonoffExtend.snzb02dr2RemoteSource(), featureGates.snzb02dr2_support_remote_source),
             m.numeric<"customSonoffSnzb02dr2", SonoffSnzb02dr2>({
                 name: "comfort_temperature_min",
                 cluster: "customSonoffSnzb02dr2",
@@ -12201,7 +12129,7 @@ export const definitions: DefinitionWithExtend[] = [
                     scale: 1000,
                     access: "STATE_GET",
                 }),
-                isBasicZB1GSPFirmwareAtLeast130,
+                featureGates.basiczb1gsp_support_output_energy,
             ),
             m.numeric<"customClusterEwelink", SonoffEwelink>({
                 name: "energy_month",
@@ -12224,7 +12152,7 @@ export const definitions: DefinitionWithExtend[] = [
                     scale: 1000,
                     access: "STATE_GET",
                 }),
-                isBasicZB1GSPFirmwareAtLeast130,
+                featureGates.basiczb1gsp_support_output_energy,
             ),
             m.numeric<"customClusterEwelink", SonoffEwelink>({
                 name: "energy_yesterday",
@@ -12256,7 +12184,7 @@ export const definitions: DefinitionWithExtend[] = [
                     scale: 1000,
                     access: "STATE_GET",
                 }),
-                isBasicZB1GSPFirmwareAtLeast130,
+                featureGates.basiczb1gsp_support_output_energy,
             ),
             m.binary<"customClusterEwelink", SonoffEwelink>({
                 name: "outlet_control_protect",
@@ -12335,8 +12263,11 @@ export const definitions: DefinitionWithExtend[] = [
                 access: "ALL",
                 entityCategory: "config",
             }),
-            sonoffExtend.readConsumptionRecord("customClusterEwelink", "readRecord", "BASIC-ZB1GSP", "1.3.0"),
-            sonoffExtend.readRecordWithMultiConsumption({withCost: false, model: "BASIC-ZB1GSP", target: "1.3.0"}),
+            withConditionalExpose(
+                sonoffExtend.readConsumptionRecord("customClusterEwelink", "readRecord"),
+                featureGates.basiczb1gsp_legacy_read_consumption,
+            ),
+            withConditionalExpose(sonoffExtend.readRecordWithMultiConsumption({withCost: false}), featureGates.basiczb1gsp_support_output_energy),
             sonoffExtend.clearConsumptionHistory(),
         ],
         ota: true,
@@ -12344,7 +12275,7 @@ export const definitions: DefinitionWithExtend[] = [
             const endpoint = device.getEndpoint(1);
             await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff", "customClusterEwelink", "seMetering"]);
             // onOff configReport is not supported on firmware >= 1.0.5, device reports proactively
-            if (firmwareSupportFeaturesVersion(device, "1.0.5", "BASIC-ZB1GSP", "lower")) {
+            if (featureGates.basiczb1gsp_legacy_on_off_reporting(device)) {
                 await reporting.onOff(endpoint, {min: 0, max: 65000, change: 1});
             }
             await endpoint.read<"customClusterEwelink", SonoffEwelink>(
