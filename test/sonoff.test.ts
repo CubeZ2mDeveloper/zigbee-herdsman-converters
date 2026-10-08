@@ -2,7 +2,8 @@ import type {Mock} from "vitest";
 import {beforeEach, describe, expect, it, vi} from "vitest";
 import type {Models as ZHModels} from "zigbee-herdsman";
 import {findByDevice} from "../src/index";
-import type {Definition, Fz, Tz} from "../src/lib/types";
+import {Enum} from "../src/lib/exposes";
+import type {Definition, DummyDevice, Fz, KeyValue, OnEvent, Tz} from "../src/lib/types";
 import {mockDevice} from "./utils";
 
 interface State {
@@ -647,13 +648,11 @@ describe("Sonoff SWV-ZFE", () => {
         endpoint = {write: writeFn, command: commandFn} as unknown as ZHModels.Endpoint;
         meta = {
             state: {
-                manual_default_settings: {
-                    irrigation_duration: 15,
-                    irrigation_mode: "capacity",
-                    irrigation_amount_unit: "liter",
-                    irrigation_amount: 42,
-                    fail_safe: 60,
-                },
+                irrigation_duration: 15,
+                irrigation_mode: "capacity",
+                irrigation_amount_unit: "liter",
+                irrigation_amount: 42,
+                fail_safe: 60,
                 seasonal_watering_adjustment: {
                     january: 1.1,
                     february: 1.2,
@@ -710,18 +709,186 @@ describe("Sonoff SWV-ZFE", () => {
         };
     });
 
-    describe("toZigbee", () => {
-        it("sends manual default settings to device", async () => {
-            const tzConverter = device.toZigbee.find((c) => c.key.includes("manual_default_settings"));
+    it("exposes manual irrigation settings as scalar controls", () => {
+        const exposes =
+            typeof device.exposes === "function" ? device.exposes(mockDevice({modelID: "SWV-ZFE", endpoints: [{ID: 1}]}), {}) : device.exposes;
+        const names = exposes.map((expose) => expose.property);
 
-            const value = {
+        expect(names).toContain("irrigation_duration");
+        expect(names).toContain("irrigation_mode");
+        expect(names).toContain("irrigation_amount_unit");
+        expect(names).toContain("irrigation_amount");
+        expect(names).toContain("fail_safe");
+    });
+
+    it("hides manual amount unit on firmware with unified water-flow units", () => {
+        const newFirmwareDevice = mockDevice({modelID: "SWV-ZFE", softwareBuildID: "1.1.0", endpoints: [{ID: 1}]});
+        const exposes = typeof device.exposes === "function" ? device.exposes(newFirmwareDevice, {}) : device.exposes;
+        const names = exposes.map((expose) => expose.property);
+
+        expect(names).not.toContain("irrigation_amount_unit");
+    });
+
+    it("uses the unified water-flow unit instead of a stale legacy unit", async () => {
+        const newFirmwareDevice = mockDevice({modelID: "SWV-ZFE", softwareBuildID: "1.1.0", endpoints: [{ID: 1}]});
+        const tzConverter = device.toZigbee.find((converter) => converter.key.includes("irrigation_duration"));
+        const result = await tzConverter.convertSet(endpoint, "irrigation_duration", 30, {
+            ...meta,
+            device: newFirmwareDevice,
+            state: {
+                irrigation_duration: 15,
+                irrigation_mode: "capacity",
+                irrigation_amount_unit: "liter",
+                irrigation_amount: 3,
+                fail_safe: 60,
+                water_flow_unit: "us_gallon",
+            },
+        });
+
+        expect(writeFn).toHaveBeenCalledWith(
+            "customClusterEwelink",
+            {
+                20509: {
+                    value: {
+                        elementType: 0x20,
+                        elements: new Uint8Array([1, 0, 30, 0, 30, 0, 10, 0, 0, 3, 0, 60]),
+                    },
+                    type: 0x48,
+                },
+            },
+            {},
+        );
+        expect(result).toMatchObject({state: {irrigation_amount: 3}});
+    });
+
+    it("preserves the real liter amount when an OTA-updated device first reports its unified unit", () => {
+        const newFirmwareDevice = mockDevice({modelID: "SWV-ZFE", softwareBuildID: "1.1.0", endpoints: [{ID: 1}]});
+        const message = {
+            data: {unitOfWaterFlow: 1},
+            endpoint: endpoint,
+            device: newFirmwareDevice,
+            meta: {},
+            groupID: 0,
+            type: "attributeReport" as const,
+        };
+        const converterMeta = {
+            state: {
+                irrigation_amount_unit: "liter",
+                irrigation_amount: 10,
+            },
+            device: newFirmwareDevice,
+            deviceExposesChanged: null,
+        };
+        const fzConverter = device.fromZigbee.find(
+            (converter) => converter.convert(device, message, vi.fn(), {}, converterMeta)?.water_flow_unit !== undefined,
+        );
+        const result = fzConverter.convert(device, message, vi.fn(), {}, converterMeta);
+
+        expect(result).toEqual({
+            water_flow_unit: "us_gallon",
+            irrigation_amount: 3,
+            irrigation_amount_real_liter: 10,
+            irrigation_amount_unit: null,
+        });
+    });
+
+    it("uses the real liter amount for every later water-flow unit change", async () => {
+        const newFirmwareDevice = mockDevice({modelID: "SWV-ZFE", softwareBuildID: "1.1.0", endpoints: [{ID: 1}]});
+        const tzConverter = device.toZigbee.find((converter) => converter.key.includes("water_flow_unit"));
+        const result = await tzConverter.convertSet(endpoint, "water_flow_unit", "imperial_gallon", {
+            ...meta,
+            device: newFirmwareDevice,
+            state: {
+                water_flow_unit: "us_gallon",
+                irrigation_amount: 3,
+                irrigation_amount_real_liter: 10,
+            },
+        });
+
+        expect(result).toEqual({
+            state: {
+                water_flow_unit: "imperial_gallon",
+                irrigation_amount: 2,
+                irrigation_amount_real_liter: 10,
+            },
+        });
+    });
+
+    it("does not clear a legacy amount unit when the reported unit is unchanged", () => {
+        const newFirmwareDevice = mockDevice({modelID: "SWV-ZFE", softwareBuildID: "1.1.0", endpoints: [{ID: 1}]});
+        const message = {
+            data: {unitOfWaterFlow: 1},
+            endpoint,
+            device: newFirmwareDevice,
+            meta: {},
+            groupID: 0,
+            type: "attributeReport" as const,
+        };
+        const converterMeta = {
+            state: {
+                irrigation_amount_unit: "us_gallon",
+                irrigation_amount: 3,
+            },
+            device: newFirmwareDevice,
+            deviceExposesChanged: null,
+        };
+        const fzConverter = device.fromZigbee.find(
+            (converter) => converter.convert(device, message, vi.fn(), {}, converterMeta)?.water_flow_unit !== undefined,
+        );
+        const result = fzConverter.convert(device, message, vi.fn(), {}, converterMeta);
+
+        expect(result).toEqual({water_flow_unit: "us_gallon"});
+    });
+
+    it("does not clear a legacy amount unit when setting the same unit", async () => {
+        const newFirmwareDevice = mockDevice({modelID: "SWV-ZFE", softwareBuildID: "1.1.0", endpoints: [{ID: 1}]});
+        const tzConverter = device.toZigbee.find((converter) => converter.key.includes("water_flow_unit"));
+        const result = await tzConverter.convertSet(endpoint, "water_flow_unit", "us_gallon", {
+            ...meta,
+            device: newFirmwareDevice,
+            state: {
+                water_flow_unit: "us_gallon",
+                irrigation_amount_unit: "us_gallon",
+                irrigation_amount: 3,
+            },
+        });
+
+        expect(result).toEqual({state: {water_flow_unit: "us_gallon"}});
+    });
+
+    it("merges a scalar manual setting with current scalar state", async () => {
+        const tzConverter = device.toZigbee.find((converter) => converter.key.includes("irrigation_duration"));
+
+        const result = await tzConverter.convertSet(endpoint, "irrigation_duration", 30, meta);
+
+        expect(writeFn).toHaveBeenCalledWith(
+            "customClusterEwelink",
+            {
+                20509: {
+                    value: {
+                        elementType: 0x20,
+                        elements: new Uint8Array([1, 0, 30, 0, 30, 0, 10, 1, 0, 42, 0, 60]),
+                    },
+                    type: 0x48,
+                },
+            },
+            {},
+        );
+        expect(result).toMatchObject({
+            state: {
                 irrigation_duration: 30,
                 irrigation_mode: "capacity",
                 irrigation_amount_unit: "liter",
                 irrigation_amount: 42,
                 fail_safe: 60,
-            };
-            const result = await tzConverter.convertSet(endpoint, "manual_default_settings", value, meta);
+            },
+        });
+    });
+
+    describe("toZigbee", () => {
+        it("fills missing scalar settings with defaults on first write", async () => {
+            const tzConverter = device.toZigbee.find((c) => c.key.includes("irrigation_duration"));
+            const result = await tzConverter.convertSet(endpoint, "irrigation_duration", 30, {...meta, state: {}});
 
             expect(writeFn).toHaveBeenCalledWith(
                 "customClusterEwelink",
@@ -729,7 +896,7 @@ describe("Sonoff SWV-ZFE", () => {
                     20509: {
                         value: {
                             elementType: 0x20,
-                            elements: new Uint8Array([1, 0, 30, 0, 30, 0, 10, 1, 0, 42, 0, 60]),
+                            elements: new Uint8Array([0, 0, 30, 0, 30, 0, 10, 1, 0, 0, 0, 0]),
                         },
                         type: 0x48,
                     },
@@ -738,7 +905,11 @@ describe("Sonoff SWV-ZFE", () => {
             );
             expect(result).toEqual({
                 state: {
-                    manual_default_settings: value,
+                    irrigation_duration: 30,
+                    irrigation_mode: "duration",
+                    irrigation_amount_unit: "liter",
+                    irrigation_amount: 0,
+                    fail_safe: 0,
                 },
             });
         });
@@ -902,6 +1073,276 @@ describe("Sonoff SWV-ZFE", () => {
                     irrigation_plan_settings_3: null,
                 },
             });
+        });
+    });
+});
+
+describe("Sonoff firmware-dependent features", () => {
+    const dummyDevice: DummyDevice = {isDummyDevice: true};
+    let sequenceNumber = 0;
+    const getExposes = (definition: Definition, device: ZHModels.Device | DummyDevice) =>
+        typeof definition.exposes === "function" ? definition.exposes(device, {}) : definition.exposes;
+    const getProperties = (definition: Definition, device: ZHModels.Device | DummyDevice) =>
+        getExposes(definition, device).map((expose) => expose.property);
+    const getEnumValues = (definition: Definition, device: ZHModels.Device | DummyDevice, property: string) => {
+        const expose = getExposes(definition, device).find((item) => item.property === property);
+        expect(expose).toBeInstanceOf(Enum);
+        return (expose as Enum).values;
+    };
+    const convertMessage = async (
+        definition: Definition,
+        device: ZHModels.Device,
+        data: KeyValue,
+        type = "attributeReport",
+        cluster = "customClusterEwelink",
+    ) => {
+        const message = {
+            data,
+            device,
+            endpoint: device.getEndpoint(1),
+            cluster,
+            type,
+            meta: {rawData: Buffer.alloc(0), zclTransactionSequenceNumber: sequenceNumber++},
+            groupID: 0,
+            linkquality: 100,
+        } as Parameters<Definition["fromZigbee"][number]["convert"]>[1];
+        const result: KeyValue = {};
+        for (const converter of definition.fromZigbee) {
+            if (converter.cluster === cluster && converter.type.includes(type)) {
+                Object.assign(result, await converter.convert(definition, message, vi.fn(), {}, {device, state: {}, deviceExposesChanged: vi.fn()}));
+            }
+        }
+        return result;
+    };
+
+    describe("BASIC-ZB1GSP", () => {
+        it.each([
+            {softwareBuildID: "1.3.1", legacyReporting: false, legacyHistory: false, outputEnergy: true},
+            {softwareBuildID: "1.0.4", legacyReporting: true, legacyHistory: true, outputEnergy: false},
+            {softwareBuildID: "1.0.5", legacyReporting: false, legacyHistory: true, outputEnergy: false},
+            {softwareBuildID: "1.0.6", legacyReporting: false, legacyHistory: true, outputEnergy: false},
+            {softwareBuildID: "1.2.9", legacyReporting: false, legacyHistory: true, outputEnergy: false},
+            {softwareBuildID: "1.3.0", legacyReporting: false, legacyHistory: false, outputEnergy: true},
+            {softwareBuildID: "1.3", legacyReporting: false, legacyHistory: false, outputEnergy: true},
+            {softwareBuildID: "1.10.0", legacyReporting: false, legacyHistory: false, outputEnergy: true},
+            {softwareBuildID: undefined, legacyReporting: false, legacyHistory: false, outputEnergy: false},
+        ])("selects exposes, initial reads and reporting for $softwareBuildID", async ({
+            softwareBuildID,
+            legacyReporting,
+            legacyHistory,
+            outputEnergy,
+        }) => {
+            const device = mockDevice({modelID: "BASIC-ZB1GSP", softwareBuildID, endpoints: [{ID: 1, inputClusterIDs: [6, 0xfc11, 0x0702]}]});
+            const definition = await findByDevice(device);
+            const properties = getProperties(definition, device);
+            expect(properties).toEqual(expect.arrayContaining(["energy_today", "energy_month", "energy_yesterday", "total_energy"]));
+            expect(properties.includes("read_consumption_records")).toBe(legacyHistory);
+            for (const property of [
+                "output_energy_today",
+                "output_energy_month",
+                "total_output_energy",
+                "read_electricity_records",
+                "read_all_electricity_records",
+            ]) {
+                expect(properties.includes(property), property).toBe(outputEnergy);
+            }
+
+            await definition.configure(device, mockDevice({modelID: "coordinator", endpoints: [{ID: 1}]}).getEndpoint(1), definition);
+            const endpoint = device.getEndpoint(1);
+            const onOffReporting = vi.mocked(endpoint.configureReporting).mock.calls.filter(([cluster]) => cluster === "genOnOff");
+            expect(onOffReporting).toHaveLength(legacyReporting ? 1 : 0);
+            if (legacyReporting) {
+                expect(onOffReporting[0][1]).toEqual([
+                    {attribute: "onOff", minimumReportInterval: 0, maximumReportInterval: 65000, reportableChange: 1},
+                ]);
+            }
+            const readCalls = vi.mocked(endpoint.read).mock.calls as [string, (string | number)[], unknown?][];
+            const initialRead = readCalls.find(([cluster, attributes]) => cluster === "customClusterEwelink" && attributes.includes("energyToday"));
+            expect(initialRead).toBeDefined();
+            for (const attribute of ["outputEnergyToday", "outputEnergyMonth", "totalOutputEnergyConsumption"]) {
+                expect(initialRead[1].includes(attribute), attribute).toBe(outputEnergy);
+            }
+        });
+
+        it("hides firmware-dependent controls on dummy devices under the existing policy", async () => {
+            const definition = await findByDevice(mockDevice({modelID: "BASIC-ZB1GSP", endpoints: [{ID: 1}]}));
+            const properties = getProperties(definition, dummyDevice);
+            expect(properties).toContain("total_energy");
+            for (const property of ["read_consumption_records", "read_electricity_records", "total_output_energy"])
+                expect(properties).not.toContain(property);
+        });
+    });
+
+    describe("SNZB-02DR2", () => {
+        const legacyProperties = ["temperature_sensor_select", "external_temperature", "external_humidity"];
+        const remoteProperties = [
+            "remote_source_status",
+            "source_1_temperature",
+            "source_1_temperature_state",
+            "source_1_humidity",
+            "source_1_humidity_state",
+            "source_2_temperature",
+            "source_2_temperature_state",
+            "source_2_humidity",
+            "source_2_humidity_state",
+        ];
+        it.each([
+            {softwareBuildID: "1.0.4", legacy: true, remote: false},
+            {softwareBuildID: "1.0.5", legacy: false, remote: true},
+            {softwareBuildID: "1.0.6", legacy: false, remote: true},
+            {softwareBuildID: undefined, legacy: false, remote: false},
+        ])("selects the display controls for $softwareBuildID", async ({softwareBuildID, legacy, remote}) => {
+            const device = mockDevice({modelID: "SNZB-02DR2", softwareBuildID, endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            const properties = getProperties(definition, device);
+            expect(properties).toEqual(expect.arrayContaining(["temperature", "humidity", "comfort_temperature_min"]));
+            for (const property of legacyProperties) expect(properties.includes(property), property).toBe(legacy);
+            for (const property of remoteProperties) expect(properties.includes(property), property).toBe(remote);
+        });
+
+        it("hides firmware-dependent display controls on dummy devices under the existing policy", async () => {
+            const definition = await findByDevice(mockDevice({modelID: "SNZB-02DR2", endpoints: [{ID: 1}]}));
+            const properties = getProperties(definition, dummyDevice);
+            expect(properties).toEqual(expect.arrayContaining(["temperature", "humidity"]));
+            for (const property of [...legacyProperties, ...remoteProperties]) expect(properties).not.toContain(property);
+        });
+    });
+
+    describe("ZBMINIR2 and MINI-ZBD", () => {
+        const devices = [
+            {modelID: "ZBMINIR2", softwareBuildID: "1.0.9", newActions: false},
+            {modelID: "ZBMINIR2", softwareBuildID: "1.1.0", newActions: true},
+            {modelID: "ZBMINIR2", softwareBuildID: "1.1.1", newActions: true},
+            {modelID: "ZBMINIR2", softwareBuildID: undefined, newActions: false},
+            {modelID: "MINI-ZBD", softwareBuildID: "1.0.9", newActions: false},
+            {modelID: "MINI-ZBD", softwareBuildID: "1.1.0", newActions: false},
+            {modelID: "MINI-ZBD", softwareBuildID: "9.0.0", newActions: false},
+        ];
+        it.each(devices)("selects action exposes for $modelID $softwareBuildID", async ({modelID, softwareBuildID, newActions}) => {
+            const device = mockDevice({modelID, manufacturerName: "SONOFF", softwareBuildID, endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            expect(definition.model).toBe(modelID);
+            expect(getEnumValues(definition, device, "action")).toEqual(newActions ? ["toggle", "double_click", "long_press"] : ["toggle"]);
+        });
+        it.each(devices)("gates new action reports and preserves toggle for $modelID $softwareBuildID", async ({
+            modelID,
+            softwareBuildID,
+            newActions,
+        }) => {
+            const device = mockDevice({modelID, manufacturerName: "SONOFF", softwareBuildID, endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            expect(definition.model).toBe(modelID);
+            expect(await convertMessage(definition, device, {detachRelayActionEvent: 2})).toEqual(newActions ? {action: "double_click"} : {});
+            expect(await convertMessage(definition, device, {detachRelayActionEvent: 3})).toEqual(newActions ? {action: "long_press"} : {});
+            expect(await convertMessage(definition, device, {detachRelayActionEvent: 99})).toEqual({});
+            expect(await convertMessage(definition, device, {})).toEqual({});
+            expect(await convertMessage(definition, device, {}, "commandToggle", "genOnOff")).toEqual({action: "toggle"});
+        });
+
+        it("includes all supported actions in documentation", async () => {
+            const definition = await findByDevice(mockDevice({modelID: "ZBMINIR2", endpoints: [{ID: 1}]}));
+            expect(getEnumValues(definition, dummyDevice, "action")).toEqual(["toggle", "double_click", "long_press"]);
+        });
+    });
+
+    describe("SNZB-09P", () => {
+        const baseSounds = [
+            "siren_classic",
+            "siren_steady",
+            "siren_rising",
+            "siren_warning",
+            "siren_rapid",
+            "siren_emergency",
+            "tone_chirp",
+            "tone_hi_lo",
+            "tone_intermittent",
+            "tone_pulse",
+        ];
+        const chimeSounds = ["chime_doorbell", "chime_classic_clock", "chime_electronic_clock", "chime_bright", "chime_soft"];
+        it.each([
+            {softwareBuildID: "1.1.8", supported: false},
+            {softwareBuildID: "1.1.9", supported: true},
+            {softwareBuildID: "1.1.10", supported: true},
+            {softwareBuildID: undefined, supported: false},
+        ])("selects sounds and startup reads for $softwareBuildID", async ({softwareBuildID, supported}) => {
+            const device = mockDevice({modelID: "SNZB-09P", softwareBuildID, endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            expect(getEnumValues(definition, device, "alarm_sound_type")).toEqual(supported ? [...baseSounds, ...chimeSounds] : baseSounds);
+            const endpoint = device.getEndpoint(1);
+            vi.mocked(endpoint.read).mockImplementation(() => {
+                expect(device.customClusters.customClusterEwelink.attributes.alarmStatus.ID).toBe(0x202e);
+                return Promise.resolve({});
+            });
+            await definition.onEvent({type: "start", data: {device, state: {}, options: {}, deviceExposesChanged: vi.fn()}});
+            expect(endpoint.read).toHaveBeenCalledTimes(supported ? 1 : 0);
+            if (supported) {
+                expect(endpoint.read).toHaveBeenCalledWith("customClusterEwelink", ["alarmStatus"], {
+                    manufacturerCode: 0x1286,
+                    disableDefaultResponse: false,
+                });
+            } else {
+                for (const type of ["deviceJoined", "deviceAnnounce", "deviceInterview"] as const) {
+                    await definition.onEvent({
+                        type,
+                        data: {device, state: {}, options: {}, deviceExposesChanged: vi.fn(), status: "successful"},
+                    } as OnEvent.Event);
+                }
+                expect(endpoint.read).not.toHaveBeenCalled();
+            }
+        });
+
+        it("filters a cloned enum without contaminating other devices or documentation", async () => {
+            const oldDevice = mockDevice({modelID: "SNZB-09P", softwareBuildID: "1.1.8", endpoints: [{ID: 1}]});
+            const newDevice = mockDevice({modelID: "SNZB-09P", softwareBuildID: "1.1.9", endpoints: [{ID: 1}]});
+            const definition = await findByDevice(newDevice);
+            const completeValues = [...baseSounds, ...chimeSounds];
+            expect(getEnumValues(definition, newDevice, "alarm_sound_type")).toEqual(completeValues);
+            expect(getEnumValues(definition, oldDevice, "alarm_sound_type")).toEqual(baseSounds);
+            expect(getEnumValues(definition, dummyDevice, "alarm_sound_type")).toEqual(completeValues);
+            expect(getEnumValues(definition, oldDevice, "alarm_sound_type")).toEqual(baseSounds);
+            expect(getEnumValues(definition, newDevice, "alarm_sound_type")).toEqual(completeValues);
+        });
+
+        it.each(["deviceJoined", "deviceAnnounce", "deviceInterview"] as const)("refreshes alarm status on %s after startup", async (type) => {
+            const device = mockDevice({modelID: "SNZB-09P", softwareBuildID: "1.1.9", endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            const data = {device, state: {}, options: {}, deviceExposesChanged: vi.fn()};
+            await definition.onEvent({type: "start", data});
+            vi.mocked(device.getEndpoint(1).read).mockClear();
+            await definition.onEvent({type, data: {...data, status: "successful"}} as OnEvent.Event);
+            expect(device.getEndpoint(1).read).toHaveBeenCalledExactlyOnceWith("customClusterEwelink", ["alarmStatus"], {
+                manufacturerCode: 0x1286,
+                disableDefaultResponse: false,
+            });
+        });
+
+        it("ignores unrelated events and tolerates a sleeping device", async () => {
+            const device = mockDevice({modelID: "SNZB-09P", softwareBuildID: "1.1.9", endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            const data = {device, state: {}, options: {}, deviceExposesChanged: vi.fn()};
+            await definition.onEvent({type: "start", data});
+            const endpoint = device.getEndpoint(1);
+            vi.mocked(endpoint.read).mockClear();
+            await definition.onEvent({type: "deviceNetworkAddressChanged", data});
+            expect(endpoint.read).not.toHaveBeenCalled();
+            vi.mocked(endpoint.read).mockRejectedValueOnce(new Error("Device is sleeping"));
+            await expect(definition.onEvent({type: "deviceAnnounce", data})).resolves.toBeUndefined();
+            expect(endpoint.read).toHaveBeenCalledTimes(1);
+        });
+
+        it.each([
+            {status: 0, alarmType: "none", siren: "OFF"},
+            {status: 1, alarmType: "manual", siren: "ON"},
+            {status: 2, alarmType: "scene", siren: "ON"},
+        ])("parses reported and read alarm status $status", async ({status, alarmType, siren}) => {
+            const device = mockDevice({modelID: "SNZB-09P", softwareBuildID: "1.1.9", endpoints: [{ID: 1}]});
+            const definition = await findByDevice(device);
+            for (const type of ["attributeReport", "readResponse"]) {
+                expect(await convertMessage(definition, device, {alarmStatus: status}, type)).toEqual({alarm_type: alarmType, siren_on: siren});
+            }
+            expect(await convertMessage(definition, device, {alarmStatus: 3})).toEqual({});
+            expect(await convertMessage(definition, device, {alarmStatus: "1"})).toEqual({});
+            expect(await convertMessage(definition, device, {})).toEqual({});
         });
     });
 });
