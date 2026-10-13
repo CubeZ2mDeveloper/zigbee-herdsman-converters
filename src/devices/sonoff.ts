@@ -1,4 +1,4 @@
-import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -5794,76 +5794,75 @@ const sonoffExtend = {
         };
     },
     seasonalWateringAdjustment: (): ModernExtend => {
-        const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
-
-        let exposesComposite = e
-            .composite("seasonal_watering_adjustment", "seasonal_watering_adjustment", ea.ALL)
-            .withDescription("Monthly watering adjustment multiplier (1.0 = 100%, 2.0 = 200%)");
-
-        for (const month of months) {
-            exposesComposite = exposesComposite.withFeature(
-                e.numeric(month, ea.ALL).withValueMin(0.1).withValueMax(2).withValueStep(0.1).withDescription(`Adjustment multiplier for ${month}`),
-            );
-        }
-
+        const SWVZN_MONTHS = [
+            "january",
+            "february",
+            "march",
+            "april",
+            "may",
+            "june",
+            "july",
+            "august",
+            "september",
+            "october",
+            "november",
+            "december",
+        ] as const;
+        const monthKey = (month: string): string => `seasonal_watering_adjustment_${month}`;
+        const exposes = SWVZN_MONTHS.map((month) =>
+            e
+                .numeric(monthKey(month), ea.ALL)
+                .withValueMin(0.1)
+                .withValueMax(2)
+                .withValueStep(0.1)
+                .withDescription(`Watering adjustment multiplier for ${month} (1.0 = 100%)`)
+                .withCategory("config"),
+        );
         const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["attributeReport", "readResponse"]>[] = [
             {
                 cluster: "customClusterEwelink",
                 type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
+                convert: (model, msg) => {
                     if (!msg.data.seasonalWateringAdjustment) return;
-
                     const array = new Uint8Array(msg.data.seasonalWateringAdjustment);
-                    if (array.length < 12) {
-                        logger.error(`seasonalWateringAdjustment invalid length=${array.length}, expected>=12`, NS);
-                        return;
-                    }
-                    const result: {[key: string]: number} = {};
-
-                    for (let i = 0; i < 12; i++) {
-                        result[months[i]] = array[i] / 10;
-                    }
-
-                    return {
-                        seasonal_watering_adjustment: result,
-                    };
+                    if (array.length < 12) return;
+                    const result: KeyValue = {};
+                    SWVZN_MONTHS.forEach((month, index) => {
+                        result[monthKey(month)] = array[index] / 10;
+                    });
+                    return result;
                 },
             },
         ];
-
         const toZigbee: Tz.Converter[] = [
             {
-                key: ["seasonal_watering_adjustment"],
+                key: SWVZN_MONTHS.map(monthKey),
                 convertSet: async (entity, key, value, meta) => {
-                    utils.assertObject(value, key);
-
+                    const known = (meta.state.seasonal_watering_adjustment ?? {}) as KeyValue;
                     const array = new Uint8Array(12);
-                    for (let i = 0; i < 12; i++) {
-                        const rawMonthValue = Number(value[months[i]]);
-                        const monthValue = Number.isFinite(rawMonthValue) ? rawMonthValue : 1;
-                        const boundedMonthValue = Math.min(2, Math.max(0.1, monthValue));
-                        array[i] = Math.round(boundedMonthValue * 10);
-                    }
+                    let written: number | undefined;
+
+                    SWVZN_MONTHS.forEach((month, index) => {
+                        const scalarKey = monthKey(month);
+                        const stored = meta.state[scalarKey] ?? known[month] ?? 1;
+                        let monthValue = Number(stored);
+                        if (scalarKey === key) {
+                            monthValue = Number(value);
+                        }
+                        monthValue = utils.numberWithinRange(Number.isFinite(monthValue) ? monthValue : 1, 0.1, 2);
+                        array[index] = Math.round(monthValue * 10);
+                        if (scalarKey === key) {
+                            written = array[index] / 10;
+                        }
+                    });
 
                     await entity.write(
                         "customClusterEwelink",
-                        {
-                            [0x501e]: {
-                                value: {
-                                    elementType: 0x20,
-                                    elements: array,
-                                },
-                                type: 0x48,
-                            },
-                        },
+                        {[0x501e]: {value: {elementType: 0x20, elements: array}, type: 0x48}},
                         utils.getOptions(meta.mapped, entity),
                     );
 
-                    return {
-                        state: {
-                            [key]: value,
-                        },
-                    };
+                    return {state: {[key]: written}};
                 },
                 convertGet: async (entity, key, meta) => {
                     await entity.read<"customClusterEwelink", SonoffSwvzn>("customClusterEwelink", ["seasonalWateringAdjustment"]);
@@ -5872,7 +5871,7 @@ const sonoffExtend = {
         ];
 
         return {
-            exposes: [exposesComposite],
+            exposes,
             fromZigbee,
             toZigbee,
             isModernExtend: true,
@@ -6079,108 +6078,102 @@ const sonoffExtend = {
         };
     },
     valveAlarmSettings: (): ModernExtend => {
-        const exposes = e
-            .composite("valve_alarm_settings", "valve_alarm_settings", ea.ALL)
-            .withDescription("Valve alarm settings")
-            .withFeature(e.binary("enable_alarm_water_shortage", ea.ALL, true, false).withDescription("Water shortage alarm"))
-            .withFeature(e.binary("enable_alarm_water_leak", ea.ALL, true, false).withDescription("Water leak alarm"))
-            .withFeature(e.binary("enable_water_shortage_auto_close", ea.ALL, true, false).withDescription("Auto close valve on water shortage"))
-            .withFeature(
-                e
-                    .numeric("alarm_water_shortage_duration", ea.ALL)
-                    .withValueMin(1)
-                    .withValueMax(10)
-                    .withUnit("min")
-                    .withDescription("Water shortage trigger alarm duration"),
-            )
-            .withFeature(
-                e
-                    .numeric("alarm_water_leak_duration", ea.ALL)
-                    .withValueMin(1)
-                    .withValueMax(3)
-                    .withUnit("min")
-                    .withDescription("Water leak trigger alarm duration"),
-            );
-
+        const defaults: KeyValue = {
+            enable_alarm_water_shortage: true,
+            enable_alarm_water_leak: true,
+            enable_water_shortage_auto_close: false,
+            alarm_water_shortage_duration: 5,
+            alarm_water_leak_duration: 1,
+        };
+        const alarmKeys = [
+            "enable_alarm_water_shortage",
+            "enable_alarm_water_leak",
+            "enable_water_shortage_auto_close",
+            "alarm_water_shortage_duration",
+            "alarm_water_leak_duration",
+        ];
+        const exposes = [
+            e.binary("enable_alarm_water_shortage", ea.ALL, true, false).withDescription("Water shortage alarm").withCategory("config"),
+            e.binary("enable_alarm_water_leak", ea.ALL, true, false).withDescription("Water leak alarm").withCategory("config"),
+            e
+                .binary("enable_water_shortage_auto_close", ea.ALL, true, false)
+                .withDescription("Auto close valve on water shortage")
+                .withCategory("config"),
+            e
+                .numeric("alarm_water_shortage_duration", ea.ALL)
+                .withValueMin(1)
+                .withValueMax(10)
+                .withUnit("min")
+                .withDescription("Water shortage trigger alarm duration")
+                .withCategory("config"),
+            e
+                .numeric("alarm_water_leak_duration", ea.ALL)
+                .withValueMin(1)
+                .withValueMax(3)
+                .withUnit("min")
+                .withDescription("Water leak trigger alarm duration")
+                .withCategory("config"),
+        ];
         const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSwvzn, ["attributeReport", "readResponse"]>[] = [
             {
                 cluster: "customClusterEwelink",
                 type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
+                convert: (model, msg) => {
                     if (!msg.data.valveAlarmSettings) return;
-
                     const array = new Uint8Array(msg.data.valveAlarmSettings);
-                    if (array.length < 4) {
-                        logger.error(`valveAlarmSettings invalid length=${array.length}, expected>=4`, NS);
-                        return;
-                    }
-                    const enableBits = array[0];
-
+                    if (array.length < 4) return;
+                    const bits = array[0];
                     return {
-                        valve_alarm_settings: {
-                            enable_alarm_water_shortage: !!(enableBits & 0b00001),
-                            enable_alarm_water_leak: !!(enableBits & 0b00010),
-                            enable_water_shortage_auto_close: !!(enableBits & 0b01000),
-                            alarm_water_shortage_duration: array[1],
-                            alarm_water_leak_duration: array[2],
-                        },
+                        enable_alarm_water_shortage: !!(bits & 0b00001),
+                        enable_alarm_water_leak: !!(bits & 0b00010),
+                        enable_water_shortage_auto_close: !!(bits & 0b01000),
+                        alarm_water_shortage_duration: array[1],
+                        alarm_water_leak_duration: array[2],
                     };
                 },
             },
         ];
-
         const toZigbee: Tz.Converter[] = [
             {
-                key: ["valve_alarm_settings"],
+                key: alarmKeys,
                 convertSet: async (entity, key, value, meta) => {
-                    utils.assertObject(value, key);
-                    const state = {
-                        enable_alarm_water_shortage: !!value.enable_alarm_water_shortage,
-                        enable_alarm_water_leak: !!value.enable_alarm_water_leak,
-                        enable_water_shortage_auto_close: !!value.enable_water_shortage_auto_close,
-                        alarm_water_shortage_duration: Number(value.alarm_water_shortage_duration) || 0,
-                        alarm_water_leak_duration: Number(value.alarm_water_leak_duration) || 0,
+                    const known = (meta.state.valve_alarm_settings ?? {}) as KeyValue;
+                    const current = (setting: string): unknown => meta.state[setting] ?? known[setting] ?? defaults[setting];
+                    const next: KeyValue = {
+                        enable_alarm_water_shortage: current("enable_alarm_water_shortage"),
+                        enable_alarm_water_leak: current("enable_alarm_water_leak"),
+                        enable_water_shortage_auto_close: current("enable_water_shortage_auto_close"),
+                        alarm_water_shortage_duration: current("alarm_water_shortage_duration"),
+                        alarm_water_leak_duration: current("alarm_water_leak_duration"),
                     };
+                    next[key] = key.startsWith("enable_") ? value === true || value === "true" || value === "ON" : Number(value) || 0;
 
-                    let enableBits = 0;
-                    if (state.enable_alarm_water_shortage) enableBits |= 0b00001;
-                    if (state.enable_alarm_water_leak) enableBits |= 0b00010;
-                    if (state.enable_water_shortage_auto_close) enableBits |= 0b01000;
+                    let bits = 0;
+                    if (next.enable_alarm_water_shortage) bits |= 0b00001;
+                    if (next.enable_alarm_water_leak) bits |= 0b00010;
+                    if (next.enable_water_shortage_auto_close) bits |= 0b01000;
 
                     const array = new Uint8Array(4);
-                    array[0] = enableBits;
-                    array[1] = state.alarm_water_shortage_duration;
-                    array[2] = state.alarm_water_leak_duration;
+                    array[0] = bits;
+                    array[1] = Number(next.alarm_water_shortage_duration) || 0;
+                    array[2] = Number(next.alarm_water_leak_duration) || 0;
                     array[3] = 0;
 
                     await entity.write(
                         "customClusterEwelink",
-                        {
-                            [0x5020]: {
-                                value: {
-                                    elementType: 0x20,
-                                    elements: array,
-                                },
-                                type: 0x48,
-                            },
-                        },
+                        {[0x5020]: {value: {elementType: 0x20, elements: array}, type: 0x48}},
                         utils.getOptions(meta.mapped, entity),
                     );
 
-                    return {
-                        state: {
-                            [key]: state,
-                        },
-                    };
+                    return {state: {[key]: next[key]}};
                 },
                 convertGet: async (entity, key, meta) => {
                     await entity.read<"customClusterEwelink", SonoffSwvzn>("customClusterEwelink", ["valveAlarmSettings"]);
                 },
             },
         ];
-
         return {
-            exposes: [exposes],
+            exposes,
             fromZigbee,
             toZigbee,
             isModernExtend: true,

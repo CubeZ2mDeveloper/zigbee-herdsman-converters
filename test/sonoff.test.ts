@@ -914,23 +914,10 @@ describe("Sonoff SWV-ZFE", () => {
         });
 
         it("sends seasonal watering adjustment to device", async () => {
-            const tzConverter = device.toZigbee.find((c) => c.key.includes("seasonal_watering_adjustment"));
+            const tzConverter = device.toZigbee.find((c) => c.key.includes("seasonal_watering_adjustment_june"));
 
-            const value = {
-                january: 1.1,
-                february: 1.2,
-                march: 1.3,
-                april: 1.4,
-                may: 1.5,
-                june: 0.7,
-                july: 1.7,
-                august: 1.8,
-                september: 1.9,
-                october: 2,
-                november: 0.9,
-                december: 0.8,
-            };
-            const result = await tzConverter.convertSet(endpoint, "seasonal_watering_adjustment", value, meta);
+            const value = 0.7;
+            const result = await tzConverter.convertSet(endpoint, "seasonal_watering_adjustment_june", value, meta);
 
             expect(writeFn).toHaveBeenCalledWith(
                 "customClusterEwelink",
@@ -947,22 +934,16 @@ describe("Sonoff SWV-ZFE", () => {
             );
             expect(result).toEqual({
                 state: {
-                    seasonal_watering_adjustment: value,
+                    seasonal_watering_adjustment_june: value,
                 },
             });
         });
 
         it("sends valve alarm settings to device", async () => {
-            const tzConverter = device.toZigbee.find((c) => c.key.includes("valve_alarm_settings"));
+            const tzConverter = device.toZigbee.find((c) => c.key.includes("alarm_water_leak_duration"));
 
-            const value = {
-                enable_alarm_water_shortage: true,
-                enable_alarm_water_leak: false,
-                enable_water_shortage_auto_close: true,
-                alarm_water_shortage_duration: 5,
-                alarm_water_leak_duration: 3,
-            };
-            const result = await tzConverter.convertSet(endpoint, "valve_alarm_settings", value, meta);
+            const value = 3;
+            const result = await tzConverter.convertSet(endpoint, "alarm_water_leak_duration", value, meta);
 
             expect(writeFn).toHaveBeenCalledWith(
                 "customClusterEwelink",
@@ -979,7 +960,7 @@ describe("Sonoff SWV-ZFE", () => {
             );
             expect(result).toEqual({
                 state: {
-                    valve_alarm_settings: value,
+                    alarm_water_leak_duration: value,
                 },
             });
         });
