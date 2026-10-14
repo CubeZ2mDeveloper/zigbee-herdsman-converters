@@ -914,10 +914,10 @@ describe("Sonoff SWV-ZFE", () => {
         });
 
         it("sends seasonal watering adjustment to device", async () => {
-            const tzConverter = device.toZigbee.find((c) => c.key.includes("seasonal_watering_adjustment_june"));
+            const tzConverter = device.toZigbee.find((c) => c.key.includes("seasonal_watering_adjustment_06_june"));
 
             const value = 0.7;
-            const result = await tzConverter.convertSet(endpoint, "seasonal_watering_adjustment_june", value, meta);
+            const result = await tzConverter.convertSet(endpoint, "seasonal_watering_adjustment_06_june", value, meta);
 
             expect(writeFn).toHaveBeenCalledWith(
                 "customClusterEwelink",
@@ -934,7 +934,7 @@ describe("Sonoff SWV-ZFE", () => {
             );
             expect(result).toEqual({
                 state: {
-                    seasonal_watering_adjustment_june: value,
+                    seasonal_watering_adjustment_06_june: value,
                 },
             });
         });

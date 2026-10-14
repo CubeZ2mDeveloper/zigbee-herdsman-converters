@@ -1,4 +1,4 @@
-﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -5808,10 +5808,12 @@ const sonoffExtend = {
             "november",
             "december",
         ] as const;
-        const monthKey = (month: string): string => `seasonal_watering_adjustment_${month}`;
-        const exposes = SWVZN_MONTHS.map((month) =>
+        // Key format includes a zero-padded month index prefix (e.g. _01_january) so that
+        // entities are displayed in calendar order when sorted alphabetically by HA.
+        const monthKey = (month: string, index: number): string => `seasonal_watering_adjustment_${String(index + 1).padStart(2, "0")}_${month}`;
+        const exposes = SWVZN_MONTHS.map((month, index) =>
             e
-                .numeric(monthKey(month), ea.ALL)
+                .numeric(monthKey(month, index), ea.ALL)
                 .withValueMin(0.1)
                 .withValueMax(2)
                 .withValueStep(0.1)
@@ -5828,7 +5830,7 @@ const sonoffExtend = {
                     if (array.length < 12) return;
                     const result: KeyValue = {};
                     SWVZN_MONTHS.forEach((month, index) => {
-                        result[monthKey(month)] = array[index] / 10;
+                        result[monthKey(month, index)] = array[index] / 10;
                     });
                     return result;
                 },
@@ -5836,19 +5838,15 @@ const sonoffExtend = {
         ];
         const toZigbee: Tz.Converter[] = [
             {
-                key: SWVZN_MONTHS.map(monthKey),
+                key: SWVZN_MONTHS.map((month, index) => monthKey(month, index)),
                 convertSet: async (entity, key, value, meta) => {
                     const known = (meta.state.seasonal_watering_adjustment ?? {}) as KeyValue;
                     const array = new Uint8Array(12);
                     let written: number | undefined;
 
                     SWVZN_MONTHS.forEach((month, index) => {
-                        const scalarKey = monthKey(month);
-                        const stored = meta.state[scalarKey] ?? known[month] ?? 1;
-                        let monthValue = Number(stored);
-                        if (scalarKey === key) {
-                            monthValue = Number(value);
-                        }
+                        const scalarKey = monthKey(month, index);
+                        let monthValue = Number(scalarKey === key ? value : (meta.state[scalarKey] ?? known[month] ?? 1));
                         monthValue = utils.numberWithinRange(Number.isFinite(monthValue) ? monthValue : 1, 0.1, 2);
                         array[index] = Math.round(monthValue * 10);
                         if (scalarKey === key) {
@@ -6299,7 +6297,7 @@ const sonoffExtend = {
             e.text("30_days_records", ea.STATE),
             e.text("180_days_records", ea.STATE),
             e
-                .composite("read_swvzf_records", "read_swvzf_records", ea.STATE_SET)
+                .composite("read_swvzf_records", "read_swvzf_records", ea.SET)
                 .withDescription(
                     hasFlowMeter
                         ? "Read irrigation water volume and duration in the past 24 hours, 30 days, and 6 months."
@@ -6815,7 +6813,7 @@ const sonoffExtend = {
 
         const expose: DefinitionExposesFunction = (device) => {
             const irrigationPlanSettings = e
-                .composite("irrigation_plan_settings", "irrigation_plan_settings", ea.STATE_SET)
+                .composite("irrigation_plan_settings", "irrigation_plan_settings", ea.SET)
                 .withDescription("Set irrigation plan")
                 .withFeature(e.numeric("plan_index", ea.SET).withValueMin(0).withValueMax(5).withDescription("Plan index"))
                 .withFeature(e.binary("enable_state", ea.SET, true, false))
