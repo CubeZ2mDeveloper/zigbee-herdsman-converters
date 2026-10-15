@@ -1496,6 +1496,8 @@ const featureGates = {
     snzb02dr2_legacy_remote_source: (device: Zh.Device): boolean => !featureGates.snzb02dr2_support_remote_source(device),
     snzb02dr2_support_remote_source: firmwareSupportFeaturesVersion("1.0.5", "higher"),
     zbminir2_external_switch_actions: firmwareSupportFeaturesVersion("1.1.0", "higher", {modelID: "ZBMINIR2"}),
+    // TODO: replace "x.x.x" with the ZBMINIL2 firmware version that adds external switch trigger type support (0xFC11/0x0016).
+    zbminil2_external_switch_trigger_mode: firmwareSupportFeaturesVersion("x.x.x", "higher", {modelID: "ZBMINIL2"}),
     snzb09p_support_chime: firmwareSupportFeaturesVersion("1.1.9", "higher", {modelID: "SNZB-09P"}),
     snzb09p_support_alarm_status: firmwareSupportFeaturesVersion("1.1.9", "higher", {modelID: "SNZB-09P"}),
     // Single-channel SWV-ZF* supports unified units from 1.1.0; dual-channel SWV-ZF2 supports them from 1.0.9.
@@ -8954,7 +8956,14 @@ export const definitions: DefinitionWithExtend[] = [
         model: "ZBMINIL2",
         vendor: "SONOFF",
         description: "Zigbee smart switch (no neutral)",
-        extend: [m.onOff(), sonoffExtend.addCustomClusterEwelink(), sonoffExtend.externalSwitchTriggerMode({values: ["edge", "pulse"]})],
+        extend: [
+            m.onOff(),
+            sonoffExtend.addCustomClusterEwelink(),
+            withConditionalExpose(
+                sonoffExtend.externalSwitchTriggerMode({values: ["edge", "pulse"]}),
+                featureGates.zbminil2_external_switch_trigger_mode,
+            ),
+        ],
         ota: true,
         configure: async (device, coordinatorEndpoint) => {
             // Unbind genPollCtrl to prevent device from sending checkin message.
@@ -8965,10 +8974,12 @@ export const definitions: DefinitionWithExtend[] = [
             if (endpoint.binds.some((b) => b.cluster.name === "genPollCtrl")) {
                 await device.getEndpoint(1).unbind("genPollCtrl", coordinatorEndpoint);
             }
-            // Bind and read the external switch trigger type (0xFC11/0x0016, factory default 0x00 = edge
-            // trigger, i.e. rocker switch; 0x01 = pulse trigger, i.e. momentary switch).
-            await reporting.bind(endpoint, coordinatorEndpoint, ["customClusterEwelink"]);
-            await endpoint.read<"customClusterEwelink", SonoffEwelink>("customClusterEwelink", ["externalTriggerMode"], defaultResponseOptions);
+            // Bind and read the external switch trigger type when supported by the firmware (0xFC11/0x0016,
+            // factory default 0x00 = edge trigger, i.e. rocker switch; 0x01 = pulse trigger, i.e. momentary switch).
+            if (featureGates.zbminil2_external_switch_trigger_mode(device)) {
+                await reporting.bind(endpoint, coordinatorEndpoint, ["customClusterEwelink"]);
+                await endpoint.read<"customClusterEwelink", SonoffEwelink>("customClusterEwelink", ["externalTriggerMode"], defaultResponseOptions);
+            }
             device.powerSource = "Mains (single phase)";
             device.save();
         },
