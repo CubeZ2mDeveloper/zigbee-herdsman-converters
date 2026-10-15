@@ -1,4 +1,4 @@
-import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -4308,6 +4308,7 @@ const sonoffExtend = {
         const commandId = 0x14;
         const replyCommandName = "getCurrentWeatherInfoReply";
         const weatherKey = "weather";
+        const setCoordinatesKey = "weather_updates";
         const DEFAULT_LONGITUDE_MICRO = 114057900;
         const DEFAULT_LATITUDE_MICRO = 22543100;
         const WEATHER_TO_VALUE: Record<string, number> = {
@@ -4319,22 +4320,50 @@ const sonoffExtend = {
             windy: 0x05,
         };
 
-        const expose = e
+        const setCoordinatesExpose = e
+            .enum(setCoordinatesKey, ea.SET, ["enable"])
+            .withCategory("config")
+            .withDescription(
+                "Tap Allow Weather Updates. Once the weather data is synced, the device will automatically update the weather information and display the corresponding icon on the E-ink screen. Note: Wake up the device by pressing the button on the back before tapping.",
+            );
+
+        const weatherExpose = e
             .enum(weatherKey, ea.STATE_SET, Object.keys(WEATHER_TO_VALUE))
             .withCategory("config")
             .withDescription(
-                "Weather shown on the E-ink screen. Selecting a value sends the default coordinates to the device and is applied on its next weather request. Note: wake up the device by pressing the button on the back before changing this value.",
+                "Weather shown on the E-ink screen. Cached and pushed immediately while the device is awake, or applied on its next periodic weather request (about 4 hours) if asleep. Use Set coordinates first to enable weather requests.",
             );
 
         const toZigbee: Tz.Converter[] = [
             {
-                key: [weatherKey],
+                key: [setCoordinatesKey],
                 convertSet: async (entity, key, value, meta) => {
                     await entity.write<"customClusterEwelink", SonoffSnzb02ul>(
                         clusterName,
                         {longitude: DEFAULT_LONGITUDE_MICRO, latitude: DEFAULT_LATITUDE_MICRO},
                         utils.getOptions(meta.mapped, entity),
                     );
+                },
+            },
+            {
+                key: [weatherKey],
+                convertSet: (entity, key, value) => {
+                    utils.assertString(value, key);
+
+                    if ("commandResponse" in entity) {
+                        entity
+                            .commandResponse<typeof clusterName, typeof replyCommandName, SonoffSnzb02ul>(
+                                clusterName,
+                                replyCommandName,
+                                {data: [0x00, 0x01, WEATHER_TO_VALUE[value]]},
+                                {
+                                    direction: Zcl.Direction.CLIENT_TO_SERVER,
+                                    disableDefaultResponse: true,
+                                    manufacturerCode: Zcl.ManufacturerCode.SHENZHEN_COOLKIT_TECHNOLOGY_CO_LTD,
+                                },
+                            )
+                            .catch((): void => undefined);
+                    }
                     return {state: {[weatherKey]: value}};
                 },
             },
@@ -4395,7 +4424,7 @@ const sonoffExtend = {
             },
         ];
 
-        return {exposes: [expose], fromZigbee, toZigbee, isModernExtend: true};
+        return {exposes: [setCoordinatesExpose, weatherExpose], fromZigbee, toZigbee, isModernExtend: true};
     },
     tpWgzbaTemperatureHysteresis: (): ModernExtend => {
         const clusterName = "customSonoffTpWgzba";
