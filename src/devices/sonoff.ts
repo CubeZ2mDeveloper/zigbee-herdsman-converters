@@ -1703,6 +1703,7 @@ const tzLocal = {
 
 type ExternalSwitchTypeCfgAgs = {
     endpointNames?: string[];
+    values?: ("edge" | "pulse" | "following(off)" | "following(on)")[];
 };
 type ExternalInchingAgs = {
     endpointNames?: string[];
@@ -4978,17 +4979,14 @@ const sonoffExtend = {
     externalSwitchTriggerMode: (args: ExternalSwitchTypeCfgAgs = {}): ModernExtend => {
         const clusterName = "customClusterEwelink" as const;
         const attributeName = "externalTriggerMode" as const;
-        const {endpointNames = undefined} = args;
+        const {endpointNames = undefined, values = ["edge", "pulse", "following(off)", "following(on)"]} = args;
         const description: string =
-            "External trigger mode, which can be one of edge, pulse, " +
-            "following(off), following(on). The appropriate triggering mode can be selected according to the type of " +
+            `External trigger mode, which can be one of ${values.join(", ")}. ` +
+            "The appropriate triggering mode can be selected according to the type of " +
             "external switch to achieve a better use experience.";
 
         const exposes: Expose[] = utils.exposeEndpoints(
-            e
-                .enum("external_trigger_mode", ea.ALL, ["edge", "pulse", "following(off)", "following(on)"])
-                .withDescription(description)
-                .withCategory("config"),
+            e.enum("external_trigger_mode", ea.ALL, values).withDescription(description).withCategory("config"),
             endpointNames,
         );
 
@@ -8956,7 +8954,7 @@ export const definitions: DefinitionWithExtend[] = [
         model: "ZBMINIL2",
         vendor: "SONOFF",
         description: "Zigbee smart switch (no neutral)",
-        extend: [m.onOff()],
+        extend: [m.onOff(), sonoffExtend.addCustomClusterEwelink(), sonoffExtend.externalSwitchTriggerMode({values: ["edge", "pulse"]})],
         ota: true,
         configure: async (device, coordinatorEndpoint) => {
             // Unbind genPollCtrl to prevent device from sending checkin message.
@@ -8967,6 +8965,10 @@ export const definitions: DefinitionWithExtend[] = [
             if (endpoint.binds.some((b) => b.cluster.name === "genPollCtrl")) {
                 await device.getEndpoint(1).unbind("genPollCtrl", coordinatorEndpoint);
             }
+            // Bind and read the external switch trigger type (0xFC11/0x0016, factory default 0x00 = edge
+            // trigger, i.e. rocker switch; 0x01 = pulse trigger, i.e. momentary switch).
+            await reporting.bind(endpoint, coordinatorEndpoint, ["customClusterEwelink"]);
+            await endpoint.read<"customClusterEwelink", SonoffEwelink>("customClusterEwelink", ["externalTriggerMode"], defaultResponseOptions);
             device.powerSource = "Mains (single phase)";
             device.save();
         },
