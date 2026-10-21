@@ -5518,9 +5518,12 @@ const sonoffExtend = {
         const waterShortageMask = dualChannel ? 0b010001 : 0b000001;
 
         const exposes = [
-            e.binary("water_leak", ea.STATE, true, false).withDescription("Indicates whether water leakage is detected").withCategory("diagnostic"),
             e
-                .binary("water_shortage", ea.STATE, true, false)
+                .binary("water_leak_detected", ea.STATE, true, false)
+                .withDescription("Indicates whether water leakage is detected")
+                .withCategory("diagnostic"),
+            e
+                .binary("water_shortage_detected", ea.STATE, true, false)
                 .withDescription("Indicates whether water shortage is detected")
                 .withCategory("diagnostic"),
         ];
@@ -5539,19 +5542,24 @@ const sonoffExtend = {
                     const currentShortage = (value & waterShortageMask) !== 0;
 
                     const oldState = meta.state.valve_abnormal_state;
-                    const newEntitiesUninitialized = meta.state.water_leak === undefined && meta.state.water_shortage === undefined;
+                    const newEntitiesUninitialized = meta.state.water_leak_detected === undefined && meta.state.water_shortage_detected === undefined;
 
                     // Initialize from legacy cached alarm state to avoid missing alarms during migration
                     let waterLeak = currentLeak;
                     let waterShortage = currentShortage;
-                    if (newEntitiesUninitialized && typeof oldState === "string" && oldState !== "normal") {
-                        waterLeak = waterLeak || oldState.includes("leak");
-                        waterShortage = waterShortage || oldState.includes("shortage");
+                    if (newEntitiesUninitialized) {
+                        // Carry over the previous binary entity names after the water_leak/water_shortage rename
+                        waterLeak = waterLeak || meta.state.water_leak === true;
+                        waterShortage = waterShortage || meta.state.water_shortage === true;
+                        if (typeof oldState === "string" && oldState !== "normal") {
+                            waterLeak = waterLeak || oldState.includes("leak");
+                            waterShortage = waterShortage || oldState.includes("shortage");
+                        }
                     }
 
                     return {
-                        water_leak: waterLeak,
-                        water_shortage: waterShortage,
+                        water_leak_detected: waterLeak,
+                        water_shortage_detected: waterShortage,
                     };
                 },
             },
@@ -5568,7 +5576,7 @@ const sonoffExtend = {
         const exposes: DefinitionExposesFunction = (device) => {
             const result: Expose[] = [
                 e
-                    .numeric("irrigation_duration", ea.STATE_SET)
+                    .numeric("manual_watering_duration", ea.STATE_SET)
                     .withValueMin(1)
                     .withValueMax(719)
                     .withUnit("min")
@@ -5578,17 +5586,17 @@ const sonoffExtend = {
             if (hasFlowMeter) {
                 result.push(
                     e
-                        .enum("irrigation_mode", ea.STATE_SET, ["duration", "capacity"])
+                        .enum("manual_watering_mode", ea.STATE_SET, ["duration", "capacity"])
                         .withDescription("Default mode for manual irrigation")
                         .withCategory("config"),
                     e
-                        .numeric("irrigation_amount", ea.STATE_SET)
+                        .numeric("manual_watering_amount", ea.STATE_SET)
                         .withValueMin(0)
                         .withValueMax(10000)
                         .withDescription("Default manual irrigation amount")
                         .withCategory("config"),
                     e
-                        .numeric("fail_safe", ea.STATE_SET)
+                        .numeric("manual_watering_timeout", ea.STATE_SET)
                         .withValueMin(0)
                         .withValueMax(719)
                         .withUnit("min")
@@ -5616,23 +5624,23 @@ const sonoffExtend = {
             1: "capacity",
         };
         const scalarToCompositeKey: {[key: string]: string} = {
-            irrigation_duration: "irrigation_duration",
-            irrigation_mode: "irrigation_mode",
+            manual_watering_duration: "manual_watering_duration",
+            manual_watering_mode: "manual_watering_mode",
             irrigation_amount_unit: "irrigation_amount_unit",
-            irrigation_amount: "irrigation_amount",
-            fail_safe: "fail_safe",
+            manual_watering_amount: "manual_watering_amount",
+            manual_watering_timeout: "manual_watering_timeout",
         };
         const publishManualSettings = (settings: KeyValue): KeyValue => ({
-            irrigation_duration: settings.irrigation_duration,
+            manual_watering_duration: settings.manual_watering_duration,
             ...(hasFlowMeter
                 ? {
-                      irrigation_mode: settings.irrigation_mode,
+                      manual_watering_mode: settings.manual_watering_mode,
                       ...(settings.irrigation_amount_unit !== undefined ? {irrigation_amount_unit: settings.irrigation_amount_unit} : {}),
-                      irrigation_amount: settings.irrigation_amount,
+                      manual_watering_amount: settings.manual_watering_amount,
                       ...(settings.irrigation_amount_real_liter !== undefined
                           ? {irrigation_amount_real_liter: settings.irrigation_amount_real_liter}
                           : {}),
-                      fail_safe: settings.fail_safe,
+                      manual_watering_timeout: settings.manual_watering_timeout,
                   }
                 : {}),
         });
@@ -5657,25 +5665,25 @@ const sonoffExtend = {
                     const safetyTimeoutLimit = (array[10] << 8) | array[11];
 
                     const manualDefaultSettings: KeyValue = {
-                        irrigation_duration: irrigationDuration || totalDuration,
+                        manual_watering_duration: irrigationDuration || totalDuration,
                     };
 
                     if (hasFlowMeter) {
-                        manualDefaultSettings.irrigation_mode = modeMapReverse[mode] ?? "duration";
+                        manualDefaultSettings.manual_watering_mode = modeMapReverse[mode] ?? "duration";
                         const irrigationAmountUnit = SWVZNEIrrigationAmountUnitFromDeviceCode(capacityUnit, meta.device);
                         if (irrigationAmountUnit) {
                             manualDefaultSettings.irrigation_amount_unit = irrigationAmountUnit;
                         }
                         const waterFlowUnit = SWVZNENormalizeWaterFlowUnit(meta.state.water_flow_unit);
                         const irrigationAmountLiters = irrigationAmountUnit && irrigationVolume * SWVZNELitersPerWaterFlowUnit[irrigationAmountUnit];
-                        manualDefaultSettings.irrigation_amount =
+                        manualDefaultSettings.manual_watering_amount =
                             irrigationAmountLiters !== undefined && waterFlowUnit
                                 ? Math.round(irrigationAmountLiters / SWVZNELitersPerWaterFlowUnit[waterFlowUnit])
                                 : irrigationVolume;
                         if (featureGates.swvzne_supports_unified_imperial_gallon(meta.device) && irrigationAmountLiters !== undefined) {
                             manualDefaultSettings.irrigation_amount_real_liter = irrigationAmountLiters;
                         }
-                        manualDefaultSettings.fail_safe = safetyTimeoutLimit;
+                        manualDefaultSettings.manual_watering_timeout = safetyTimeoutLimit;
                     }
 
                     if (featureGates.swvzne_supports_unified_imperial_gallon(meta.device)) {
@@ -5688,7 +5696,7 @@ const sonoffExtend = {
 
         const toZigbee: Tz.Converter[] = [
             {
-                key: hasFlowMeter ? Object.keys(scalarToCompositeKey) : ["irrigation_duration"],
+                key: hasFlowMeter ? Object.keys(scalarToCompositeKey) : ["manual_watering_duration"],
                 convertSet: async (entity, key, value, meta) => {
                     const partialValue: KeyValue = {};
                     partialValue[scalarToCompositeKey[key]] = value;
@@ -5697,16 +5705,20 @@ const sonoffExtend = {
                         ? meta.state.water_flow_unit
                         : meta.state.irrigation_amount_unit;
                     const current: KeyValue = {
-                        irrigation_duration: meta.state.irrigation_duration ?? 10,
-                        irrigation_mode: meta.state.irrigation_mode ?? "duration",
+                        // Fall back to pre-rename cache keys so existing manual watering settings migrate to the new entities
+                        manual_watering_duration: meta.state.manual_watering_duration ?? meta.state.irrigation_duration ?? 10,
+                        manual_watering_mode: meta.state.manual_watering_mode ?? meta.state.irrigation_mode ?? "duration",
                         irrigation_amount_unit: manualAmountUnit ?? "liter",
-                        irrigation_amount: meta.state.irrigation_amount ?? 0,
-                        fail_safe: meta.state.fail_safe ?? 0,
+                        manual_watering_amount: meta.state.manual_watering_amount ?? meta.state.irrigation_amount ?? 0,
+                        manual_watering_timeout: meta.state.manual_watering_timeout ?? meta.state.fail_safe ?? 0,
                     };
                     const nextValue = {...current, ...partialValue};
 
-                    if (hasFlowMeter && (typeof nextValue.irrigation_mode !== "string" || modeMap[nextValue.irrigation_mode] === undefined)) {
-                        logger.error("irrigation_mode invalid value, expected one of: duration, capacity.", NS);
+                    if (
+                        hasFlowMeter &&
+                        (typeof nextValue.manual_watering_mode !== "string" || modeMap[nextValue.manual_watering_mode] === undefined)
+                    ) {
+                        logger.error("manual_watering_mode invalid value, expected one of: duration, capacity.", NS);
                         return;
                     }
                     let capacityUnit = SWVZNELegacyIrrigationAmountUnitCodeByName.liter;
@@ -5728,15 +5740,15 @@ const sonoffExtend = {
                         return parsed;
                     };
 
-                    const irrigationDuration = parseRequiredInt("irrigation_duration");
+                    const irrigationDuration = parseRequiredInt("manual_watering_duration");
                     const irrigationInterval = 10;
-                    const irrigationVolume = hasFlowMeter ? parseRequiredInt("irrigation_amount") : 10;
-                    const safetyTimeoutLimit = hasFlowMeter ? parseRequiredInt("fail_safe") : 10;
+                    const irrigationVolume = hasFlowMeter ? parseRequiredInt("manual_watering_amount") : 10;
+                    const safetyTimeoutLimit = hasFlowMeter ? parseRequiredInt("manual_watering_timeout") : 10;
                     if (irrigationDuration === undefined || irrigationVolume === undefined || safetyTimeoutLimit === undefined) {
                         return;
                     }
 
-                    const mode = hasFlowMeter ? modeMap[String(nextValue.irrigation_mode)] : modeMap.duration;
+                    const mode = hasFlowMeter ? modeMap[String(nextValue.manual_watering_mode)] : modeMap.duration;
 
                     const array = new Uint8Array(12);
                     array[0] = mode;
@@ -6073,35 +6085,43 @@ const sonoffExtend = {
     },
     valveAlarmSettings: (): ModernExtend => {
         const defaults: KeyValue = {
-            enable_alarm_water_shortage: true,
-            enable_alarm_water_leak: true,
-            enable_water_shortage_auto_close: false,
-            alarm_water_shortage_duration: 5,
-            alarm_water_leak_duration: 1,
+            alarm_shortage_enabled: true,
+            alarm_leak_enabled: true,
+            alarm_shortage_auto_close_enabled: false,
+            alarm_shortage_detection_time: 5,
+            alarm_leak_detection_time: 1,
         };
         const alarmKeys = [
-            "enable_alarm_water_shortage",
-            "enable_alarm_water_leak",
-            "enable_water_shortage_auto_close",
-            "alarm_water_shortage_duration",
-            "alarm_water_leak_duration",
+            "alarm_shortage_enabled",
+            "alarm_leak_enabled",
+            "alarm_shortage_auto_close_enabled",
+            "alarm_shortage_detection_time",
+            "alarm_leak_detection_time",
         ];
+        // Pre-rename cache keys, used to migrate settings stored under the old entity names
+        const legacySettingKeys: {[key: string]: string} = {
+            alarm_shortage_enabled: "enable_alarm_water_shortage",
+            alarm_leak_enabled: "enable_alarm_water_leak",
+            alarm_shortage_auto_close_enabled: "enable_water_shortage_auto_close",
+            alarm_shortage_detection_time: "alarm_water_shortage_duration",
+            alarm_leak_detection_time: "alarm_water_leak_duration",
+        };
         const exposes = [
-            e.binary("enable_alarm_water_shortage", ea.ALL, true, false).withDescription("Water shortage alarm").withCategory("config"),
-            e.binary("enable_alarm_water_leak", ea.ALL, true, false).withDescription("Water leak alarm").withCategory("config"),
+            e.binary("alarm_shortage_enabled", ea.ALL, true, false).withDescription("Water shortage alarm").withCategory("config"),
+            e.binary("alarm_leak_enabled", ea.ALL, true, false).withDescription("Water leak alarm").withCategory("config"),
             e
-                .binary("enable_water_shortage_auto_close", ea.ALL, true, false)
+                .binary("alarm_shortage_auto_close_enabled", ea.ALL, true, false)
                 .withDescription("Auto close valve on water shortage")
                 .withCategory("config"),
             e
-                .numeric("alarm_water_shortage_duration", ea.ALL)
+                .numeric("alarm_shortage_detection_time", ea.ALL)
                 .withValueMin(1)
                 .withValueMax(10)
                 .withUnit("min")
                 .withDescription("Water shortage trigger alarm duration")
                 .withCategory("config"),
             e
-                .numeric("alarm_water_leak_duration", ea.ALL)
+                .numeric("alarm_leak_detection_time", ea.ALL)
                 .withValueMin(1)
                 .withValueMax(3)
                 .withUnit("min")
@@ -6118,11 +6138,11 @@ const sonoffExtend = {
                     if (array.length < 4) return;
                     const bits = array[0];
                     return {
-                        enable_alarm_water_shortage: !!(bits & 0b00001),
-                        enable_alarm_water_leak: !!(bits & 0b00010),
-                        enable_water_shortage_auto_close: !!(bits & 0b01000),
-                        alarm_water_shortage_duration: array[1],
-                        alarm_water_leak_duration: array[2],
+                        alarm_shortage_enabled: !!(bits & 0b00001),
+                        alarm_leak_enabled: !!(bits & 0b00010),
+                        alarm_shortage_auto_close_enabled: !!(bits & 0b01000),
+                        alarm_shortage_detection_time: array[1],
+                        alarm_leak_detection_time: array[2],
                     };
                 },
             },
@@ -6132,25 +6152,30 @@ const sonoffExtend = {
                 key: alarmKeys,
                 convertSet: async (entity, key, value, meta) => {
                     const known = (meta.state.valve_alarm_settings ?? {}) as KeyValue;
-                    const current = (setting: string): unknown => meta.state[setting] ?? known[setting] ?? defaults[setting];
+                    const current = (setting: string): unknown =>
+                        meta.state[setting] ??
+                        known[setting] ??
+                        meta.state[legacySettingKeys[setting]] ??
+                        known[legacySettingKeys[setting]] ??
+                        defaults[setting];
                     const next: KeyValue = {
-                        enable_alarm_water_shortage: current("enable_alarm_water_shortage"),
-                        enable_alarm_water_leak: current("enable_alarm_water_leak"),
-                        enable_water_shortage_auto_close: current("enable_water_shortage_auto_close"),
-                        alarm_water_shortage_duration: current("alarm_water_shortage_duration"),
-                        alarm_water_leak_duration: current("alarm_water_leak_duration"),
+                        alarm_shortage_enabled: current("alarm_shortage_enabled"),
+                        alarm_leak_enabled: current("alarm_leak_enabled"),
+                        alarm_shortage_auto_close_enabled: current("alarm_shortage_auto_close_enabled"),
+                        alarm_shortage_detection_time: current("alarm_shortage_detection_time"),
+                        alarm_leak_detection_time: current("alarm_leak_detection_time"),
                     };
-                    next[key] = key.startsWith("enable_") ? value === true || value === "true" || value === "ON" : Number(value) || 0;
+                    next[key] = key.endsWith("_enabled") ? value === true || value === "true" || value === "ON" : Number(value) || 0;
 
                     let bits = 0;
-                    if (next.enable_alarm_water_shortage) bits |= 0b00001;
-                    if (next.enable_alarm_water_leak) bits |= 0b00010;
-                    if (next.enable_water_shortage_auto_close) bits |= 0b01000;
+                    if (next.alarm_shortage_enabled) bits |= 0b00001;
+                    if (next.alarm_leak_enabled) bits |= 0b00010;
+                    if (next.alarm_shortage_auto_close_enabled) bits |= 0b01000;
 
                     const array = new Uint8Array(4);
                     array[0] = bits;
-                    array[1] = Number(next.alarm_water_shortage_duration) || 0;
-                    array[2] = Number(next.alarm_water_leak_duration) || 0;
+                    array[1] = Number(next.alarm_shortage_detection_time) || 0;
+                    array[2] = Number(next.alarm_leak_detection_time) || 0;
                     array[3] = 0;
 
                     await entity.write(
@@ -6194,7 +6219,7 @@ const sonoffExtend = {
                     utils.assertNumber(value);
                     const waterFlowUnit = SWVZNEUnifiedWaterFlowUnitByCode[value];
                     if (!waterFlowUnit) return;
-                    const amount = meta.state.irrigation_amount;
+                    const amount = meta.state.manual_watering_amount ?? meta.state.irrigation_amount;
                     const amountRealLiters = meta.state.irrigation_amount_real_liter;
                     let manualAmount: number | undefined;
                     let manualAmountRealLiters: number | undefined;
@@ -6212,7 +6237,7 @@ const sonoffExtend = {
                     }
                     return {
                         water_flow_unit: waterFlowUnit,
-                        ...(manualAmount !== undefined ? {irrigation_amount: manualAmount} : {}),
+                        ...(manualAmount !== undefined ? {manual_watering_amount: manualAmount} : {}),
                         ...(manualAmountRealLiters !== undefined ? {irrigation_amount_real_liter: manualAmountRealLiters} : {}),
                         ...(clearLegacyAmountUnit ? {irrigation_amount_unit: null} : {}),
                     };
@@ -6245,7 +6270,7 @@ const sonoffExtend = {
                         {unitOfWaterFlow: waterFlowUnitCode},
                         utils.getOptions(meta.mapped, entity),
                     );
-                    const amount = meta.state.irrigation_amount;
+                    const amount = meta.state.manual_watering_amount ?? meta.state.irrigation_amount;
                     const amountRealLiters = meta.state.irrigation_amount_real_liter;
                     let manualAmount: number | undefined;
                     let manualAmountRealLiters: number | undefined;
@@ -6264,7 +6289,7 @@ const sonoffExtend = {
                     return {
                         state: {
                             water_flow_unit: normalizedUnit,
-                            ...(manualAmount !== undefined ? {irrigation_amount: manualAmount} : {}),
+                            ...(manualAmount !== undefined ? {manual_watering_amount: manualAmount} : {}),
                             ...(manualAmountRealLiters !== undefined ? {irrigation_amount_real_liter: manualAmountRealLiters} : {}),
                             ...(clearLegacyAmountUnit ? {irrigation_amount_unit: null} : {}),
                         },
@@ -12309,6 +12334,7 @@ export const definitions: DefinitionWithExtend[] = [
         vendor: "SONOFF",
         whiteLabel: [{model: "SWV-ZNU", vendor: "SONOFF", fingerprint: [{modelID: "SWV-ZNU"}]}],
         description: "Zigbee smart water valve",
+        version: "0.0.1",
         extend: [
             m.deviceAddCustomCluster("customClusterEwelink", {
                 name: "customClusterEwelink",
