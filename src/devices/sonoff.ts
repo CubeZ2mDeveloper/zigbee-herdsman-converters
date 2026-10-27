@@ -410,7 +410,9 @@ interface SonoffSsZ2n {
         humidityAverInHour: number;
         tempAndHumiHalfHourReport: number[];
     };
-    commands: never;
+    commands: {
+        refreshMeasurements: {};
+    };
     commandResponses: never;
 }
 
@@ -14284,7 +14286,9 @@ export const definitions: DefinitionWithExtend[] = [
                     frostThresholdEnable: {name: "frostThresholdEnable", ID: 0x202c, type: Zcl.DataType.UINT8, write: true},
                     tempAndHumiHalfHourReport: {name: "tempAndHumiHalfHourReport", ID: 0x2010, type: Zcl.DataType.ARRAY},
                 },
-                commands: {},
+                commands: {
+                    refreshMeasurements: {name: "refreshMeasurements", ID: 0x00, parameters: []},
+                },
                 commandsResponse: {},
             }),
             // official clusters
@@ -14498,6 +14502,27 @@ export const definitions: DefinitionWithExtend[] = [
                 unit: "%",
             }),
             sonoffExtend.tempAndHumiHalfHourReport(),
+        ],
+        exposes: [
+            e
+                .enum("refresh_measurements", ea.SET, ["refresh"])
+                .withDescription(
+                    "Requests an immediate soil temperature and moisture measurement. The device acknowledges first and reports new values about 3 seconds later; the report, not the acknowledgement, carries the data.",
+                ),
+        ],
+        toZigbee: [
+            {
+                key: ["refresh_measurements"],
+                convertSet: async (entity, key, value, meta) => {
+                    await entity.command<"customClusterEwelink", "refreshMeasurements", SonoffSsZ2n>(
+                        "customClusterEwelink",
+                        "refreshMeasurements",
+                        {},
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: {refresh_measurements: value}};
+                },
+            },
         ],
         configure: async (device, coordinatorEndpoint) => {
             const endpoint = device.getEndpoint(1);
