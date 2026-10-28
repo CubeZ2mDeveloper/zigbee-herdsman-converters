@@ -14299,8 +14299,6 @@ export const definitions: DefinitionWithExtend[] = [
                 percentageReportingConfig: {min: 1620, max: 1740, change: 2},
                 // Voltage reporting interval follows the ewelink family precedent (see lib/ewelink.ts `ewelinkBattery`).
                 voltageReportingConfig: {min: 3600, max: 7200, change: 100},
-                // The device reports the battery percentage already converted.
-                dontDividePercentage: true,
             }),
             m.temperature({valueMin: -20, valueMax: 60, reporting: {min: 120, max: 3600, change: 100}}),
             m.soilMoisture({valueMin: 0, valueMax: 100, reporting: {min: 120, max: 3600, change: 300}}),
@@ -14514,12 +14512,15 @@ export const definitions: DefinitionWithExtend[] = [
             {
                 key: ["refresh_measurements"],
                 convertSet: async (entity, key, value, meta) => {
+                    // Fire-and-forget: the device currently does not answer with a Default Response, so awaiting
+                    // would only time out; new values arrive as attribute reports ~3s later. sendPolicy "immediate"
+                    // avoids the 1h pending queue, so the request is not queued and retried.
                     await entity.command<"customClusterEwelink", "refreshMeasurements", SonoffSsZ2n>(
                         "customClusterEwelink",
                         "refreshMeasurements",
                         {},
-                        utils.getOptions(meta.mapped, entity),
-                    );
+                        {...utils.getOptions(meta.mapped, entity), sendPolicy: "immediate"},
+                    ).catch(() => {});
                     return {state: {refresh_measurements: value}};
                 },
             },
