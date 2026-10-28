@@ -1,0 +1,18 @@
+{
+    "compilerOptions": {
+        "module": "commonjs",
+        "target": "esnext",
+        "lib": ["esnext"],
+        "types": ["node"],
+        "strictNullChecks": false,
+        "esModuleInterop": true,
+        "allowSyntheticDefaultImports": true,
+        "skipLibCheck": true,
+        "paths": {
+            "zigbee-herdsman-converters/lib/*": ["../../dist/lib/*"]
+        },
+        "outDir": ".",
+        "rootDir": "."
+    },
+    "files": ["MINI-ZBRBS.ts"]
+}
