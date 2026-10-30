@@ -14294,11 +14294,10 @@ export const definitions: DefinitionWithExtend[] = [
             // official clusters
             m.battery({
                 voltage: true,
-                voltageReporting: true,
+                // Voltage reporting is configured best-effort in `configure`: the current firmware
+                // answers UNSUPPORTED_ATTRIBUTE, which must not abort (and eventually block) configure.
                 // Reporting interval from the firmware spec (1620s / 1740s / Δ2%).
                 percentageReportingConfig: {min: 1620, max: 1740, change: 2},
-                // Voltage reporting interval follows the ewelink family precedent (see lib/ewelink.ts `ewelinkBattery`).
-                voltageReportingConfig: {min: 3600, max: 7200, change: 100},
             }),
             m.temperature({valueMin: -20, valueMax: 60, reporting: {min: 120, max: 3600, change: 100}}),
             m.soilMoisture({valueMin: 0, valueMax: 100, reporting: {min: 120, max: 3600, change: 300}}),
@@ -14342,7 +14341,7 @@ export const definitions: DefinitionWithExtend[] = [
             }),
             m.enumLookup<"customClusterEwelink", SonoffSsZ2n>({
                 name: "measure_interval",
-                lookup: {"1_min": 0, "5_min": 1, "15_min": 2, "30_min": 3, "1_hour": 4, "2_hours": 5},
+                lookup: {"2_min": 0, "5_min": 1, "15_min": 2, "30_min": 3, "1_hour": 4, "2_hours": 5},
                 cluster: "customClusterEwelink",
                 attribute: "measureInterval",
                 entityCategory: "config",
@@ -14512,15 +14511,12 @@ export const definitions: DefinitionWithExtend[] = [
             {
                 key: ["refresh_measurements"],
                 convertSet: async (entity, key, value, meta) => {
-                    // Fire-and-forget: the device currently does not answer with a Default Response, so awaiting
-                    // would only time out; new values arrive as attribute reports ~3s later. sendPolicy "immediate"
-                    // avoids the 1h pending queue, so the request is not queued and retried.
                     await entity.command<"customClusterEwelink", "refreshMeasurements", SonoffSsZ2n>(
                         "customClusterEwelink",
                         "refreshMeasurements",
                         {},
-                        {...utils.getOptions(meta.mapped, entity), sendPolicy: "immediate"},
-                    ).catch(() => {});
+                        utils.getOptions(meta.mapped, entity),
+                    );
                     return {state: {refresh_measurements: value}};
                 },
             },
@@ -14531,6 +14527,15 @@ export const definitions: DefinitionWithExtend[] = [
                 throw new Error("Endpoint 1 not found");
             }
             await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff"]);
+            // The hourly statistics default to 0 on the device; read them once after pairing so the
+            // exposes show 0 instead of null until the device sends its first hourly report.
+            await endpoint.read("customClusterEwelink", [0x2008, 0x2009, 0x200a, 0x200b, 0x200c, 0x200d, 0x2010]);
+        // Voltage reporting interval follows the ewelink family precedent (see lib/ewelink.ts `ewelinkBattery`).
+        // Configure it best-effort: the current firmware answers UNSUPPORTED_ATTRIBUTE and a hard failure
+        // here would abort configure on every attempt, eventually disabling reconfiguration for the device.
+        await reporting.batteryVoltage(endpoint, {min: 3600, max: 7200, change: 100}).catch((error) => {
+            logger.warning(`Battery voltage reporting is not supported by the device firmware yet: ${error.message}`, NS);
+        });
         },
         ota: true,
     },
