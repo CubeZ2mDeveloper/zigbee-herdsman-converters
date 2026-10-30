@@ -7486,10 +7486,10 @@ const sonoffExtend = {
             .withDescription("Humidity readings reported during the last 30 minutes.");
 
         const toZigbee: Tz.Converter[] = [];
-        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSsZ2n, ["attributeReport"]>[] = [
+        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSsZ2n, ["attributeReport", "readResponse"]>[] = [
             {
                 cluster: "customClusterEwelink",
-                type: ["attributeReport"],
+                type: ["attributeReport", "readResponse"],
                 convert: (model, msg, publish, options, meta) => {
                     const key = "tempAndHumiHalfHourReport";
                     const rawFrame = Buffer.isBuffer(msg.meta?.rawData) ? msg.meta.rawData.toString("hex") : "n/a";
@@ -7515,7 +7515,7 @@ const sonoffExtend = {
 
                     if (data.length === 0) {
                         logger.info(`half-hour report empty payload, data=${decodedData}, raw=${rawFrame}, payloadHex=${payloadHex}`, NS);
-                        return;
+                        return {temperature_half_hour_records: [], humidity_half_hour_records: []};
                     }
 
                     const leadingByte = data.readUInt8(0);
