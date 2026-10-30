@@ -14533,8 +14533,11 @@ export const definitions: DefinitionWithExtend[] = [
         // Voltage reporting interval follows the ewelink family precedent (see lib/ewelink.ts `ewelinkBattery`).
         // Configure it best-effort: the current firmware answers UNSUPPORTED_ATTRIBUTE and a hard failure
         // here would abort configure on every attempt, eventually disabling reconfiguration for the device.
-        await reporting.batteryVoltage(endpoint, {min: 3600, max: 7200, change: 100}).catch((error) => {
+        await reporting.batteryVoltage(endpoint, {min: 3600, max: 7200, change: 100}).catch(async (error) => {
             logger.warning(`Battery voltage reporting is not supported by the device firmware yet: ${error.message}`, NS);
+            // Reporting is unavailable, but the attribute itself is readable: read it once so the
+            // expose shows the current voltage instead of null until the firmware supports reporting.
+            await endpoint.read("genPowerCfg", ["batteryVoltage"]).catch(() => {});
         });
         },
         ota: true,
