@@ -8953,6 +8953,13 @@ const ssZ2nClassifyStatus = (value: unknown, min: unknown, max: unknown): "Low" 
 };
 
 /**
+ * SS-Z2N: thresholds that were sent but not confirmed by the device yet.
+ * Sleepy end devices queue downlink writes and z2m only updates its cached state after the write
+ * succeeds; remembering the in-flight values keeps back-to-back writes from validating against stale ones.
+ */
+const ssZ2nPendingThresholds = new Map<string, Record<string, number>>();
+
+/**
  * SS-Z2N: comfort threshold converter that keeps the derived status expose in sync.
  * Writes the scaled attribute and recomputes the status from the cached measurement and the
  * counterpart threshold, so the status does not wait for the next measurement report.
@@ -8972,9 +8979,43 @@ const ssZ2nThresholdConverter = (args: {
         key: [key],
         convertSet: async (entity, key, value, meta) => {
             utils.assertNumber(value, key);
-            await entity.write("customClusterEwelink", {[attributeId]: {value: Math.round(value * 100), type: dataType}});
 
-            const cachedPair = meta.state?.[pairKey];
+            const ieeeAddr = meta.device?.ieeeAddr ?? "";
+            const inFlight = ssZ2nPendingThresholds.get(ieeeAddr);
+            const cachedPair = inFlight?.[pairKey] ?? meta.state?.[pairKey];
+            if (typeof cachedPair === "number") {
+                const inverted = isMin ? value >= cachedPair : value <= cachedPair;
+                if (inverted) {
+                    const current = meta.state?.[key];
+                    if (typeof current === "number") {
+                        // z2m only logs converter errors, so the control would keep the rejected value.
+                        // The frontend merges device state with a 250 ms debounce, so the publishes have to be
+                        // spaced out, otherwise they collapse into one update equal to the current value.
+                        await meta.publish({[key]: value});
+                        await new Promise((resolve) => setTimeout(resolve, 400));
+                        await meta.publish({[key]: current});
+                    }
+                    throw new Error(
+                        isMin
+                            ? `${key} (${value}) must be lower than ${pairKey} (${cachedPair})`
+                            : `${key} (${value}) must be higher than ${pairKey} (${cachedPair})`,
+                    );
+                }
+            }
+
+            ssZ2nPendingThresholds.set(ieeeAddr, {...inFlight, [key]: value});
+            try {
+                await entity.write("customClusterEwelink", {[attributeId]: {value: Math.round(value * 100), type: dataType}});
+            } finally {
+                const pending = ssZ2nPendingThresholds.get(ieeeAddr);
+                if (pending) {
+                    delete pending[key];
+                    if (Object.keys(pending).length === 0) {
+                        ssZ2nPendingThresholds.delete(ieeeAddr);
+                    }
+                }
+            }
+
             const status = ssZ2nClassifyStatus(
                 meta.state?.[measureKey],
                 isMin ? value : cachedPair,
