@@ -408,7 +408,6 @@ interface SonoffSsZ2n {
         humidityMaxInHour: number;
         humidityMinInHour: number;
         humidityAverInHour: number;
-        tempAndHumiHalfHourReport: number[];
     };
     commands: {
         refreshMeasurements: {};
@@ -7469,143 +7468,6 @@ const sonoffExtend = {
             isModernExtend: true,
         };
     },
-    // Parses the 0x2010 half-hour history TLV (TotalLength + little-endian end timestamp + typed 2-byte samples).
-    // Ported from the removed SNZB-02B implementation (commit before 0de459ee5); the SS-Z2N firmware reuses the same report format.
-    tempAndHumiHalfHourReport: (): ModernExtend => {
-        const record = e
-            .composite("record", "record", ea.STATE)
-            .withFeature(e.numeric("value", ea.STATE))
-            .withFeature(e.text("time", ea.STATE).withDescription("Time in local ISO format with timezone"));
-
-        const tempExpose = e
-            .list("temperature_half_hour_records", ea.STATE, record)
-            .withDescription("Temperature readings reported during the last 30 minutes.");
-
-        const humiExpose = e
-            .list("humidity_half_hour_records", ea.STATE, record)
-            .withDescription("Humidity readings reported during the last 30 minutes.");
-
-        const toZigbee: Tz.Converter[] = [];
-        const fromZigbee: Fz.Converter<"customClusterEwelink", SonoffSsZ2n, ["attributeReport", "readResponse"]>[] = [
-            {
-                cluster: "customClusterEwelink",
-                type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
-                    const key = "tempAndHumiHalfHourReport";
-                    const rawFrame = Buffer.isBuffer(msg.meta?.rawData) ? msg.meta.rawData.toString("hex") : "n/a";
-                    let decodedData: string;
-
-                    try {
-                        decodedData = JSON.stringify(msg.data);
-                    } catch {
-                        decodedData = String(msg.data);
-                    }
-
-                    if (!Object.hasOwn(msg.data, key)) {
-                        return;
-                    }
-
-                    const rawBytes = zclArrayValueToBytes(msg.data[key]);
-                    if (rawBytes === undefined) {
-                        logger.info(`half-hour report unsupported array payload, data=${decodedData}, raw=${rawFrame}`, NS);
-                        return;
-                    }
-                    const data = Buffer.from(rawBytes);
-                    const payloadHex = data.toString("hex");
-
-                    if (data.length === 0) {
-                        logger.info(`half-hour report empty payload, data=${decodedData}, raw=${rawFrame}, payloadHex=${payloadHex}`, NS);
-                        return {temperature_half_hour_records: [], humidity_half_hour_records: []};
-                    }
-
-                    const leadingByte = data.readUInt8(0);
-                    const hasArrayLengthHeader = data.length > 6 && leadingByte === data.length - 1;
-                    let index = hasArrayLengthHeader ? 1 : 0;
-
-                    if (data.length < index + 6) {
-                        logger.info(
-                            `half-hour report payload too short. totalLength=${data.length}, required>=${index + 6}, data=${decodedData}, raw=${rawFrame}, payloadHex=${payloadHex}`,
-                            NS,
-                        );
-                        return;
-                    }
-
-                    const rawTimestamp = data.readUInt32LE(index);
-                    const offset = -new Date(rawTimestamp * 1000).getTimezoneOffset();
-                    const time = rawTimestamp - offset * 60;
-                    index += 4;
-
-                    const len = data.readUInt8(index);
-                    index++;
-
-                    if (len < 1) {
-                        logger.info(
-                            `half-hour report invalid value length=${len}, data=${decodedData}, raw=${rawFrame}, payloadHex=${payloadHex}`,
-                            NS,
-                        );
-                        return;
-                    }
-
-                    const type = data.readUInt8(index);
-                    index++;
-
-                    if (type !== 0 && type !== 1) {
-                        logger.info(
-                            `half-hour report invalid type=${type}. Expected 0 (temperature) or 1 (humidity), data=${decodedData}, raw=${rawFrame}, payloadHex=${payloadHex}`,
-                            NS,
-                        );
-                        return;
-                    }
-
-                    const dataBytes = len - 1;
-                    const availableValueBytes = data.length - index;
-                    const safeValueBytes = Math.min(dataBytes, availableValueBytes);
-                    const sampleCount = Math.floor(safeValueBytes / 2);
-
-                    if (dataBytes % 2 !== 0) {
-                        logger.info(`half-hour report expectedValueBytes=${dataBytes} is not even, raw=${rawFrame}, payloadHex=${payloadHex}`, NS);
-                    }
-
-                    if (safeValueBytes < dataBytes) {
-                        logger.info(
-                            `half-hour report payload truncated. expectedValueBytes=${dataBytes}, availableValueBytes=${availableValueBytes}, raw=${rawFrame}, payloadHex=${payloadHex}`,
-                            NS,
-                        );
-                    }
-
-                    const valueEnd = index + safeValueBytes;
-                    let timeIndex = sampleCount - 1;
-                    const values = [];
-
-                    for (let i = index; i + 1 < valueEnd; i += 2) {
-                        const raw = type === 0 ? data.readInt16LE(i) : data.readUInt16LE(i);
-                        const sampleTime = time - timeIndex * 60;
-                        const sampleTimeIso = formatUtcSecondsToIsoWithOffset(sampleTime);
-                        const sampleValue = raw / 100;
-
-                        values.push({
-                            value: sampleValue,
-                            time: sampleTimeIso,
-                        });
-                        timeIndex--;
-                    }
-
-                    const exposeKey = type === 0 ? "temperature_half_hour_records" : "humidity_half_hour_records";
-                    const payload = {[exposeKey]: values};
-
-                    logger.info(`parsed ${type === 0 ? "temperature" : "humidity"} half-hour report with ${values.length} samples`, NS);
-
-                    return payload;
-                },
-            },
-        ];
-        return {
-            exposes: [tempExpose, humiExpose],
-            fromZigbee,
-            toZigbee,
-            isModernExtend: true,
-        };
-    },
     clearConsumptionHistory: (): ModernExtend => {
         const clusterName = "customClusterEwelink";
         const commandName = "clearHistory";
@@ -14284,7 +14146,6 @@ export const definitions: DefinitionWithExtend[] = [
                     temperatureThresholdEnable: {name: "temperatureThresholdEnable", ID: 0x202a, type: Zcl.DataType.UINT8, write: true},
                     humidityThresholdEnable: {name: "humidityThresholdEnable", ID: 0x202b, type: Zcl.DataType.UINT8, write: true},
                     frostThresholdEnable: {name: "frostThresholdEnable", ID: 0x202c, type: Zcl.DataType.UINT8, write: true},
-                    tempAndHumiHalfHourReport: {name: "tempAndHumiHalfHourReport", ID: 0x2010, type: Zcl.DataType.ARRAY},
                 },
                 commands: {
                     refreshMeasurements: {name: "refreshMeasurements", ID: 0x00, parameters: []},
@@ -14293,10 +14154,7 @@ export const definitions: DefinitionWithExtend[] = [
             }),
             // official clusters
             m.battery({
-                voltage: true,
-                // Voltage reporting is configured best-effort in `configure`: the current firmware
-                // answers UNSUPPORTED_ATTRIBUTE, which must not abort (and eventually block) configure.
-                // Reporting interval from the firmware spec (1620s / 1740s / Δ2%).
+                // Battery percentage reporting interval from the firmware spec (1620s / 1740s / Δ2%).
                 percentageReportingConfig: {min: 1620, max: 1740, change: 2},
             }),
             m.temperature({valueMin: -20, valueMax: 60, reporting: {min: 120, max: 3600, change: 100}}),
@@ -14309,8 +14167,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "temperatureCalibration",
                 entityCategory: "config",
-                description:
-                    "Offset to add/subtract to the reported temperature. Note: wake up the device by pressing the button on the back before changing this value.",
+                description: "Offset to add/subtract to the reported temperature.",
                 valueMin: -10,
                 valueMax: 10,
                 scale: 100,
@@ -14322,8 +14179,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "humidityCalibration",
                 entityCategory: "config",
-                description:
-                    "Offset to add/subtract to the reported relative humidity. Note: wake up the device by pressing the button on the back before changing this value.",
+                description: "Offset added to or subtracted from the reported soil moisture value.",
                 valueMin: -100,
                 valueMax: 100,
                 scale: 100,
@@ -14336,8 +14192,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "temperatureUnits",
                 entityCategory: "config",
-                description:
-                    "The unit of the temperature reported by the device. Note: wake up the device by pressing the button on the back before changing this value.",
+                description: "Select the temperature unit reported by the device.",
             }),
             m.enumLookup<"customClusterEwelink", SonoffSsZ2n>({
                 name: "measure_interval",
@@ -14346,15 +14201,14 @@ export const definitions: DefinitionWithExtend[] = [
                 attribute: "measureInterval",
                 entityCategory: "config",
                 description:
-                    "Detection and reporting frequency of the sensor, defaults to 5 minutes. Note: wake up the device by pressing the button on the back before changing this value.",
+                    "Set the interval for scheduled measurements and reports. Default: 5 minutes.",
             }),
             m.numeric<"customClusterEwelink", SonoffSsZ2n>({
                 name: "comfort_temperature_min",
                 cluster: "customClusterEwelink",
                 attribute: "comfortTemperatureMin",
                 entityCategory: "config",
-                description:
-                    "Lower temperature threshold for the low-temperature alarm: the device alerts when the temperature drops below this value. Defaults to 8 °C. Note: wake up the device by pressing the button on the back before changing this value.",
+                    description: "Soil temperature below this value is classified as low. Default: 8 °C.",
                 valueMin: -20,
                 valueMax: 60,
                 valueStep: 1,
@@ -14366,8 +14220,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "comfortTemperatureMax",
                 entityCategory: "config",
-                description:
-                    "Upper temperature threshold for the high-temperature alarm: the device alerts when the temperature rises above this value. Defaults to 32 °C. Note: wake up the device by pressing the button on the back before changing this value.",
+                    description: "Soil temperature above this value is classified as high. Default: 32 °C.",
                 valueMin: -20,
                 valueMax: 60,
                 valueStep: 1,
@@ -14379,8 +14232,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "comfortHumidityMin",
                 entityCategory: "config",
-                description:
-                    "Lower relative humidity threshold for the dry alarm: the device alerts when the humidity drops below this value. Defaults to 15%. Note: wake up the device by pressing the button on the back before changing this value.",
+                    description: "Soil moisture below this value is classified as low. Default: 15%.",
                 valueMin: 1,
                 valueMax: 99,
                 valueStep: 1,
@@ -14392,8 +14244,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "comfortHumidityMax",
                 entityCategory: "config",
-                description:
-                    "Upper relative humidity threshold for the damp alarm: the device alerts when the humidity rises above this value. Defaults to 30%. Note: wake up the device by pressing the button on the back before changing this value.",
+                    description: "Soil moisture above this value is classified as high. Default: 30%.",
                 valueMin: 1,
                 valueMax: 99,
                 valueStep: 1,
@@ -14406,8 +14257,7 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "frostProtectionTemperature",
                 entityCategory: "config",
-                description:
-                    "Frost protection threshold: the device triggers the frost alarm when the temperature drops below this value. Defaults to 5 °C. Note: wake up the device by pressing the button on the back before changing this value.",
+                    description: "Soil temperature below this value indicates a risk of frost. Default: 5 °C.",
                 valueMin: -10,
                 valueMax: 20,
                 valueStep: 1,
@@ -14498,13 +14348,12 @@ export const definitions: DefinitionWithExtend[] = [
                 scale: 100,
                 unit: "%",
             }),
-            sonoffExtend.tempAndHumiHalfHourReport(),
         ],
         exposes: [
             e
                 .enum("refresh_measurements", ea.SET, ["refresh"])
                 .withDescription(
-                    "Requests an immediate soil temperature and moisture measurement. The device acknowledges first and reports new values about 3 seconds later; the report, not the acknowledgement, carries the data.",
+                    "Click Refresh to take new soil temperature and moisture measurements. The device will report the latest readings once the measurements are complete.",
                 ),
         ],
         toZigbee: [
@@ -14529,16 +14378,7 @@ export const definitions: DefinitionWithExtend[] = [
             await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff"]);
             // The hourly statistics default to 0 on the device; read them once after pairing so the
             // exposes show 0 instead of null until the device sends its first hourly report.
-            await endpoint.read("customClusterEwelink", [0x2008, 0x2009, 0x200a, 0x200b, 0x200c, 0x200d, 0x2010]);
-        // Voltage reporting interval follows the ewelink family precedent (see lib/ewelink.ts `ewelinkBattery`).
-        // Configure it best-effort: the current firmware answers UNSUPPORTED_ATTRIBUTE and a hard failure
-        // here would abort configure on every attempt, eventually disabling reconfiguration for the device.
-        await reporting.batteryVoltage(endpoint, {min: 3600, max: 7200, change: 100}).catch(async (error) => {
-            logger.warning(`Battery voltage reporting is not supported by the device firmware yet: ${error.message}`, NS);
-            // Reporting is unavailable, but the attribute itself is readable: read it once so the
-            // expose shows the current voltage instead of null until the firmware supports reporting.
-            await endpoint.read("genPowerCfg", ["batteryVoltage"]).catch(() => {});
-        });
+            await endpoint.read("customClusterEwelink", [0x2008, 0x2009, 0x200a, 0x200b, 0x200c, 0x200d]);
         },
         ota: true,
     },
