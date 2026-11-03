@@ -8953,13 +8953,6 @@ const ssZ2nClassifyStatus = (value: unknown, min: unknown, max: unknown): "Low" 
 };
 
 /**
- * SS-Z2N: thresholds that were sent but not confirmed by the device yet.
- * Sleepy end devices queue downlink writes and z2m only updates its cached state after the write
- * succeeds; remembering the in-flight values keeps back-to-back writes from validating against stale ones.
- */
-const ssZ2nPendingThresholds = new Map<string, Record<string, number>>();
-
-/**
  * SS-Z2N: comfort threshold converter that keeps the derived status expose in sync.
  * Writes the scaled attribute and recomputes the status from the cached measurement and the
  * counterpart threshold, so the status does not wait for the next measurement report.
@@ -8980,9 +8973,7 @@ const ssZ2nThresholdConverter = (args: {
         convertSet: async (entity, key, value, meta) => {
             utils.assertNumber(value, key);
 
-            const ieeeAddr = meta.device?.ieeeAddr ?? "";
-            const inFlight = ssZ2nPendingThresholds.get(ieeeAddr);
-            const cachedPair = inFlight?.[pairKey] ?? meta.state?.[pairKey];
+            const cachedPair = meta.state?.[pairKey];
             if (typeof cachedPair === "number") {
                 const inverted = isMin ? value >= cachedPair : value <= cachedPair;
                 if (inverted) {
@@ -8995,26 +8986,17 @@ const ssZ2nThresholdConverter = (args: {
                         await new Promise((resolve) => setTimeout(resolve, 400));
                         await meta.publish({[key]: current});
                     }
+                    // The frontend shows the content of the last parenthesis of this message as a toast, so the
+                    // sentence sits inside it. Keep it free of nested parentheses.
                     throw new Error(
                         isMin
-                            ? `${key} (${value}) must be lower than ${pairKey} (${cachedPair})`
-                            : `${key} (${value}) must be higher than ${pairKey} (${cachedPair})`,
+                            ? `invalid threshold (${key} must be lower than ${pairKey})`
+                            : `invalid threshold (${key} must be higher than ${pairKey})`,
                     );
                 }
             }
 
-            ssZ2nPendingThresholds.set(ieeeAddr, {...inFlight, [key]: value});
-            try {
-                await entity.write("customClusterEwelink", {[attributeId]: {value: Math.round(value * 100), type: dataType}});
-            } finally {
-                const pending = ssZ2nPendingThresholds.get(ieeeAddr);
-                if (pending) {
-                    delete pending[key];
-                    if (Object.keys(pending).length === 0) {
-                        ssZ2nPendingThresholds.delete(ieeeAddr);
-                    }
-                }
-            }
+            await entity.write("customClusterEwelink", {[attributeId]: {value: Math.round(value * 100), type: dataType}});
 
             const status = ssZ2nClassifyStatus(
                 meta.state?.[measureKey],
