@@ -14585,9 +14585,6 @@ export const definitions: DefinitionWithExtend[] = [
                 throw new Error("Endpoint 1 not found");
             }
             await reporting.bind(endpoint, coordinatorEndpoint, ["genOnOff"]);
-            // The hourly statistics default to 0 on the device; read them once after pairing so the
-            // exposes show 0 instead of null until the device sends its first hourly report.
-            await endpoint.read("customClusterEwelink", [0x2008, 0x2009, 0x200a, 0x200b, 0x200c, 0x200d]);
         },
         ota: true,
     },
