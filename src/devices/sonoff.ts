@@ -9047,6 +9047,98 @@ const ssZ2nFrostThresholdConverter = (): Tz.Converter => ({
  */
 const ssZ2nExposeOnly = (expose: Expose): ModernExtend => ({exposes: [expose], isModernExtend: true});
 
+/** SS-Z2N: derived status exposes, placed next to the thresholds they relate to via `ssZ2nExposeOnly`. */
+const ssZ2nStatusExposes = {
+    temperature: e
+        .enum("temperature_status", ea.STATE, ["Low", "Normal", "High"])
+        .withLabel("Soil temperature status")
+        .withDescription("Current soil temperature status based on the configured temperature thresholds."),
+    humidity: e
+        .enum("humidity_status", ea.STATE, ["Low", "Normal", "High"])
+        .withLabel("Soil moisture status")
+        .withDescription("Current soil moisture status based on the configured moisture thresholds."),
+    frostRisk: e
+        .enum("frost_risk_status", ea.STATE, ["Risk", "Normal"])
+        .withLabel("Frost risk status")
+        .withDescription("Current frost risk status based on the configured frost risk temperature threshold."),
+};
+
+/**
+ * SS-Z2N: manual measurement refresh plus the derived status fields.
+ * Recomputes the status on every temperature/moisture report, so it never waits for the next threshold write.
+ */
+const ssZ2nStatusAndRefresh = (): ModernExtend => ({
+    exposes: [
+        e
+            .enum("refresh_measurements", ea.SET, ["refresh"])
+            .withDescription(
+                "Click Refresh to take new soil temperature and moisture measurements. The device will report the latest readings once the measurements are complete.",
+            ),
+    ],
+    fromZigbee: [
+        {
+            cluster: "msTemperatureMeasurement",
+            type: ["attributeReport", "readResponse"],
+            convert: (model, msg, publish, options, meta) => {
+                const measuredValue = msg.data.measuredValue;
+                if (typeof measuredValue !== "number") {
+                    return;
+                }
+
+                const temperature = measuredValue / 100;
+                const payload: Record<string, string> = {};
+                const status = ssZ2nClassifyStatus(
+                    temperature,
+                    meta.state?.comfort_temperature_min,
+                    meta.state?.comfort_temperature_max,
+                );
+                if (status !== undefined) {
+                    payload.temperature_status = status;
+                }
+                const frostRisk = ssZ2nClassifyFrostRisk(temperature, meta.state?.frost_protection_temperature);
+                if (frostRisk !== undefined) {
+                    payload.frost_risk_status = frostRisk;
+                }
+
+                return Object.keys(payload).length === 0 ? undefined : payload;
+            },
+        },
+        {
+            cluster: "msSoilMoisture",
+            type: ["attributeReport", "readResponse"],
+            convert: (model, msg, publish, options, meta) => {
+                const measuredValue = msg.data.measuredValue;
+                if (typeof measuredValue !== "number") {
+                    return;
+                }
+
+                const status = ssZ2nClassifyStatus(
+                    measuredValue / 100,
+                    meta.state?.comfort_humidity_min,
+                    meta.state?.comfort_humidity_max,
+                );
+
+                return status === undefined ? undefined : {humidity_status: status};
+            },
+        },
+    ],
+    toZigbee: [
+        {
+            key: ["refresh_measurements"],
+            convertSet: async (entity, key, value, meta) => {
+                await entity.command<"customClusterEwelink", "refreshMeasurements", SonoffSsZ2n>(
+                    "customClusterEwelink",
+                    "refreshMeasurements",
+                    {},
+                    utils.getOptions(meta.mapped, entity),
+                );
+                return {state: {refresh_measurements: value}};
+            },
+        },
+    ],
+    isModernExtend: true,
+});
+
 export const definitions: DefinitionWithExtend[] = [
     {
         zigbeeModel: ["NSPanelP-Router", "Cuber ZLI Router"],
@@ -14259,6 +14351,7 @@ export const definitions: DefinitionWithExtend[] = [
                 },
                 commandsResponse: {},
             }),
+            ssZ2nStatusAndRefresh(),
             // official clusters
             m.battery({
                 // Battery percentage reporting interval from the firmware spec (1620s / 1740s / Δ2%).
@@ -14294,14 +14387,6 @@ export const definitions: DefinitionWithExtend[] = [
                 unit: "%",
             }),
             m.enumLookup<"customClusterEwelink", SonoffSsZ2n>({
-                name: "temperature_units",
-                lookup: {celsius: 0, fahrenheit: 1},
-                cluster: "customClusterEwelink",
-                attribute: "temperatureUnits",
-                entityCategory: "config",
-                description: "Select the temperature unit reported by the device.",
-            }),
-            m.enumLookup<"customClusterEwelink", SonoffSsZ2n>({
                 name: "measure_interval",
                 lookup: {"2_min": 0, "5_min": 1, "15_min": 2, "30_min": 3, "1_hour": 4, "2_hours": 5},
                 cluster: "customClusterEwelink",
@@ -14334,12 +14419,7 @@ export const definitions: DefinitionWithExtend[] = [
                 scale: 100,
                 unit: "°C",
             }),
-            ssZ2nExposeOnly(
-                e
-                    .enum("temperature_status", ea.STATE, ["Low", "Normal", "High"])
-                    .withLabel("Soil temperature status")
-                    .withDescription("Current soil temperature status based on the configured temperature thresholds."),
-            ),
+            ssZ2nExposeOnly(ssZ2nStatusExposes.temperature),
             m.numeric<"customClusterEwelink", SonoffSsZ2n>({
                 name: "comfort_humidity_min",
                 cluster: "customClusterEwelink",
@@ -14364,12 +14444,7 @@ export const definitions: DefinitionWithExtend[] = [
                 scale: 100,
                 unit: "%",
             }),
-            ssZ2nExposeOnly(
-                e
-                    .enum("humidity_status", ea.STATE, ["Low", "Normal", "High"])
-                    .withLabel("Soil moisture status")
-                    .withDescription("Current soil moisture status based on the configured moisture thresholds."),
-            ),
+            ssZ2nExposeOnly(ssZ2nStatusExposes.humidity),
             // Frost alarm range -10~20℃ with default 5℃, per PRD §5.8.4.
             m.numeric<"customClusterEwelink", SonoffSsZ2n>({
                 name: "frost_protection_temperature",
@@ -14383,12 +14458,7 @@ export const definitions: DefinitionWithExtend[] = [
                 scale: 100,
                 unit: "°C",
             }),
-            ssZ2nExposeOnly(
-                e
-                    .enum("frost_risk_status", ea.STATE, ["Risk", "Normal"])
-                    .withLabel("Frost risk status")
-                    .withDescription("Current frost risk status based on the configured frost risk temperature threshold."),
-            ),
+            ssZ2nExposeOnly(ssZ2nStatusExposes.frostRisk),
             m.binary<"customClusterEwelink", SonoffSsZ2n>({
                 name: "temperature_threshold_enable",
                 cluster: "customClusterEwelink",
@@ -14474,73 +14544,7 @@ export const definitions: DefinitionWithExtend[] = [
                 unit: "%",
             }),
         ],
-        exposes: [
-            e
-                .enum("refresh_measurements", ea.SET, ["refresh"])
-                .withDescription(
-                    "Click Refresh to take new soil temperature and moisture measurements. The device will report the latest readings once the measurements are complete.",
-                ),
-        ],
-        fromZigbee: [
-            {
-                cluster: "msTemperatureMeasurement",
-                type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
-                    const measuredValue = msg.data.measuredValue;
-                    if (typeof measuredValue !== "number") {
-                        return;
-                    }
-
-                    const temperature = measuredValue / 100;
-                    const payload: Record<string, string> = {};
-                    const status = ssZ2nClassifyStatus(
-                        temperature,
-                        meta.state?.comfort_temperature_min,
-                        meta.state?.comfort_temperature_max,
-                    );
-                    if (status !== undefined) {
-                        payload.temperature_status = status;
-                    }
-                    const frostRisk = ssZ2nClassifyFrostRisk(temperature, meta.state?.frost_protection_temperature);
-                    if (frostRisk !== undefined) {
-                        payload.frost_risk_status = frostRisk;
-                    }
-
-                    return Object.keys(payload).length === 0 ? undefined : payload;
-                },
-            },
-            {
-                cluster: "msSoilMoisture",
-                type: ["attributeReport", "readResponse"],
-                convert: (model, msg, publish, options, meta) => {
-                    const measuredValue = msg.data.measuredValue;
-                    if (typeof measuredValue !== "number") {
-                        return;
-                    }
-
-                    const status = ssZ2nClassifyStatus(
-                        measuredValue / 100,
-                        meta.state?.comfort_humidity_min,
-                        meta.state?.comfort_humidity_max,
-                    );
-
-                    return status === undefined ? undefined : {humidity_status: status};
-                },
-            },
-        ],
         toZigbee: [
-            {
-                key: ["refresh_measurements"],
-                convertSet: async (entity, key, value, meta) => {
-                    await entity.command<"customClusterEwelink", "refreshMeasurements", SonoffSsZ2n>(
-                        "customClusterEwelink",
-                        "refreshMeasurements",
-                        {},
-                        utils.getOptions(meta.mapped, entity),
-                    );
-                    return {state: {refresh_measurements: value}};
-                },
-            },
             ssZ2nThresholdConverter({
                 key: "comfort_temperature_min",
                 attributeId: 0x0004,
