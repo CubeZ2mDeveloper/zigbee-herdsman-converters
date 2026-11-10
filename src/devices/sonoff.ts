@@ -1506,6 +1506,7 @@ const featureGates = {
     zbminil2_external_switch_trigger_mode: firmwareSupportFeaturesVersion("1.0.19", "higher", {modelID: "ZBMINIL2"}),
     zbrbs_single_switch_mode: firmwareSupportFeaturesVersion("1.2.0", "higher", {modelID: "MINI-ZBRBS"}),
     mini_zb2gs_external_switch_actions: firmwareSupportFeaturesVersion("1.1.2", "higher", {modelID: "MINI-ZB2GS"}),
+    mini_zb2gsl_external_switch_actions: firmwareSupportFeaturesVersion("1.0.5", "higher", {modelID: "MINI-ZB2GS-L"}),
     snzb09p_support_chime: firmwareSupportFeaturesVersion("1.1.9", "higher", {modelID: "SNZB-09P"}),
     snzb09p_support_alarm_status: firmwareSupportFeaturesVersion("1.1.9", "higher", {modelID: "SNZB-09P"}),
     // Single-channel SWV-ZF* supports unified units from 1.1.0; dual-channel SWV-ZF2 supports them from 1.0.9.
@@ -11897,7 +11898,7 @@ export const definitions: DefinitionWithExtend[] = [
         ota: true,
         extend: [
             m.deviceEndpoints({endpoints: {l1: 1, l2: 2}}),
-            m.commandsOnOff({commands: ["toggle"], endpointNames: ["l1", "l2"]}),
+            sonoffExtend.externalSwitchActions({endpointNames: ["l1", "l2"], gate: featureGates.mini_zb2gsl_external_switch_actions}),
             m.onOff({endpointNames: ["l1", "l2"]}),
             sonoffExtend.addCustomClusterEwelink(),
             sonoffExtend.externalSwitchTriggerMode({endpointNames: ["l1", "l2"]}),
