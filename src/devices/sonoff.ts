@@ -1,4 +1,4 @@
-import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -386,6 +386,9 @@ interface SonoffSnzb02ul {
         humidityCalibration: number;
         longitude: number;
         latitude: number;
+        customDisplayComponentConfig: number[];
+        memoPageText: number[];
+        screenCarouselConfig: number[];
     };
     commands: {
         getCurrentWeatherInfo: {data: number[]};
@@ -1502,6 +1505,7 @@ const featureGates = {
     // Unknown firmware retains the legacy display controls, matching the original firmwareAtLeast fallback.
     snzb02dr2_legacy_remote_source: (device: Zh.Device): boolean => !featureGates.snzb02dr2_support_remote_source(device),
     snzb02dr2_support_remote_source: firmwareSupportFeaturesVersion("1.0.5", "higher"),
+    snzb02ul_screen_configuration: firmwareSupportFeaturesVersion("1.0.4", "higher", {modelID: "SNZB-02UL"}),
     zbminir2_external_switch_actions: firmwareSupportFeaturesVersion("1.1.0", "higher", {modelID: "ZBMINIR2"}),
     zbminil2_external_switch_trigger_mode: firmwareSupportFeaturesVersion("1.0.19", "higher", {modelID: "ZBMINIL2"}),
     zbrbs_single_switch_mode: firmwareSupportFeaturesVersion("1.2.0", "higher", {modelID: "MINI-ZBRBS"}),
@@ -4234,18 +4238,18 @@ const sonoffExtend = {
                 .withCategory("config"),
             e
                 .numeric("remote_temperature", ea.STATE_SET)
-                .withValueMin(-20)
+                .withValueMin(-50)
                 .withValueMax(60)
                 .withUnit("°C")
                 .withValueStep(0.1)
                 .withDescription(
-                    "Remote temperature value displayed on the E-ink screen. Note: wake up the device by pressing the button on the back before changing this value.",
+                    "Remote temperature value displayed on the E-ink screen. Note: Wake up the device by pressing the button on the back before changing this value.The configurable range is -50°C to 60°C. Please ensure the selected value is within the remote sensor's recommended operating temperature range.",
                 )
                 .withCategory("config"),
             e
                 .numeric("remote_humidity", ea.STATE_SET)
-                .withValueMin(5)
-                .withValueMax(95)
+                .withValueMin(1)
+                .withValueMax(99)
                 .withUnit("%")
                 .withDescription(
                     "Remote humidity value displayed on the E-ink screen. Note: wake up the device by pressing the button on the back before changing this value.",
@@ -4315,6 +4319,259 @@ const sonoffExtend = {
         ];
 
         return {exposes, fromZigbee: [], toZigbee, isModernExtend: true};
+    },
+    customDisplayComponentConfig: (): ModernExtend => {
+        const clusterName = "customClusterEwelink";
+        const componentNames = ["screen_comfort", "screen_time", "screen_date", "screen_weather"];
+        const exposes = [
+            ...componentNames.map((name) =>
+                e.binary(name, ea.ALL, "ON", "OFF").withCategory("config").withDescription("Show this component on the main screen."),
+            ),
+            e
+                .enum("screen_time_format", ea.ALL, ["12h", "24h"])
+                .withCategory("config")
+                .withDescription("Choose whether the time is displayed in 12-hour or 24-hour format."),
+        ];
+        const keys = exposes.map((expose) => expose.property);
+
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffSnzb02ul, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (!msg.data.customDisplayComponentConfig) return;
+                    const array = new Uint8Array(msg.data.customDisplayComponentConfig);
+                    const type = array[0];
+                    const componentCount = array[3];
+                    const state: KeyValue = {};
+                    if (type === 0x00) {
+                        let offset = 4;
+                        for (let i = 0; i < componentCount; i++) {
+                            const [componentType, _componentId, componentState, valueLength] = array.slice(offset, offset + 4);
+                            state[componentNames[componentType]] = componentState === 1 ? "ON" : "OFF";
+                            if (componentType === 0x01 && valueLength > 0) {
+                                const value = array[offset + 4];
+                                const formats = ["12h", "24h"];
+                                state.screen_time_format = formats[value];
+                            }
+                            offset += 4 + valueLength;
+                        }
+                    }
+                    return state;
+                },
+            },
+        ];
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: keys,
+                convertSet: async (entity, key, value, meta) => {
+                    const partialValue: KeyValue = {};
+                    partialValue[key] = value;
+                    const current: KeyValue = {
+                        screen_comfort: meta.state.screen_comfort ?? "ON",
+                        screen_time: meta.state.screen_time ?? "ON",
+                        screen_date: meta.state.screen_date ?? "ON",
+                        screen_weather: meta.state.screen_weather ?? "ON",
+                        screen_time_format: meta.state.screen_time_format ?? "24h",
+                    };
+                    const nextValue = {...current, ...partialValue};
+                    const array = [0, 2, 0, 0];
+                    for (const [componentType, name] of componentNames.entries()) {
+                        if (name in nextValue) {
+                            const componentState = nextValue[name] === "ON" ? 1 : 0;
+                            const componentValue: number[] = [];
+                            if (componentType === 0x01 && nextValue.screen_time_format !== undefined) {
+                                const format = nextValue.screen_time_format === "24h" ? 1 : 0;
+                                componentValue.push(format);
+                            }
+                            array.push(componentType, 0, componentState, componentValue.length, ...componentValue);
+                            array[1] += 4 + componentValue.length;
+                            array[3]++;
+                        }
+                    }
+                    await entity.write<typeof clusterName, SonoffSnzb02ul>(
+                        clusterName,
+                        {
+                            [0x202f]: {value: {elementType: Zcl.DataType.UINT8, elements: array}, type: Zcl.DataType.ARRAY},
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: nextValue};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffSnzb02ul>(clusterName, ["customDisplayComponentConfig"]);
+                },
+            },
+        ];
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
+    },
+    memoPageText: (): ModernExtend => {
+        const clusterName = "customClusterEwelink";
+        const exposes = [
+            e
+                .text("memo_page_text", ea.ALL)
+                .withCategory("config")
+                .withDescription(
+                    "Memo text in printable ASCII. Text wraps automatically at 15 characters per line and is limited to 4 lines. Empty text clears the memo.",
+                ),
+            e
+                .enum("memo_text_alignment", ea.ALL, ["left", "center"])
+                .withCategory("config")
+                .withDescription("Horizontal alignment of the memo text."),
+        ];
+        const keys = exposes.map((expose) => expose.property);
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffSnzb02ul, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (!msg.data.memoPageText) return;
+                    const array = new Uint8Array(msg.data.memoPageText);
+                    const type = array[0];
+                    const lineCount = array[2];
+                    const textAlignment = array[3];
+                    const state: KeyValue = {};
+                    if (type === 0x00) {
+                        const lines: string[] = [];
+                        let offset = 5;
+                        for (let i = 0; i < lineCount; i++) {
+                            const lineLength = array[offset] ?? 0;
+                            offset++;
+                            const line = Buffer.from(array.slice(offset, offset + lineLength)).toString("ascii");
+                            lines.push(line);
+                            offset += lineLength;
+                        }
+                        state.memo_page_text = lines.join("\n");
+                        state.memo_text_alignment = textAlignment === 1 ? "center" : "left";
+                    }
+                    return state;
+                },
+            },
+        ];
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: keys,
+                convertSet: async (entity, key, value, meta) => {
+                    const partialValue: KeyValue = {};
+                    partialValue[key] = value;
+                    const current: KeyValue = {
+                        memo_page_text: meta.state.memo_page_text ?? "",
+                        memo_text_alignment: meta.state.memo_text_alignment ?? "center",
+                    };
+                    const nextValue = {...current, ...partialValue};
+
+                    const text = String(nextValue.memo_page_text);
+                    const lines: string[] = [];
+                    if (text !== "") {
+                        for (const line of text.split("\n")) {
+                            if (lines.length === 4) break;
+                            for (let offset = 0; offset < Math.max(1, line.length) && lines.length < 4; offset += 15) {
+                                lines.push(line.slice(offset, offset + 15));
+                            }
+                        }
+                    }
+                    const textAlignment = nextValue.memo_text_alignment === "center" ? 1 : 0;
+                    const array = [0, 3, 0, textAlignment, 0];
+                    for (const line of lines) {
+                        const lineValue = Buffer.from(line, "ascii");
+                        array.push(lineValue.length, ...lineValue);
+                        array[1] += 1 + lineValue.length;
+                        array[2]++;
+                    }
+                    nextValue.memo_page_text = lines.join("\n");
+                    await entity.write<typeof clusterName, SonoffSnzb02ul>(
+                        clusterName,
+                        {
+                            [0x2030]: {value: {elementType: Zcl.DataType.UINT8, elements: array}, type: Zcl.DataType.ARRAY},
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: nextValue};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffSnzb02ul>(clusterName, ["memoPageText"]);
+                },
+            },
+        ];
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
+    },
+    screenCarouselConfig: (): ModernExtend => {
+        const clusterName = "customClusterEwelink";
+        const pageKeys = ["screen_page_time", "screen_page_temperature_history", "screen_page_humidity_history", "screen_page_memo"];
+        const exposes = [
+            e
+                .binary("screen_carousel", ea.ALL, "ON", "OFF")
+                .withCategory("config")
+                .withDescription("Enable automatic cycling through the selected pages. The main page is always included."),
+            e
+                .enum("screen_carousel_interval", ea.ALL, ["3m", "5m", "10m"])
+                .withCategory("config")
+                .withDescription("Time to show each page before moving to the next (3, 5, or 10 minutes)."),
+            ...pageKeys.map((name) =>
+                e
+                    .binary(name, ea.ALL, "ON", "OFF")
+                    .withCategory("config")
+                    .withDescription(
+                        "Include this page in carousel cycling and button-controlled page switching. Page order: main, time, temperature history, humidity history, memo.",
+                    ),
+            ),
+        ];
+        const keys = exposes.map((expose) => expose.property);
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffSnzb02ul, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (!msg.data.screenCarouselConfig) return;
+                    const array = new Uint8Array(msg.data.screenCarouselConfig);
+                    const payload = array.slice(2);
+                    const [enabled, interval, pageCount] = payload;
+                    const pages = payload.slice(3, 3 + pageCount);
+                    const state: KeyValue = {screen_carousel: enabled === 1 ? "ON" : "OFF", screen_carousel_interval: `${interval}m`};
+                    for (const [id, name] of pageKeys.entries()) state[name] = pages.includes(id + 1) ? "ON" : "OFF";
+                    return state;
+                },
+            },
+        ];
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: keys,
+                convertSet: async (entity, key, value, meta) => {
+                    const partialValue: KeyValue = {};
+                    partialValue[key] = value;
+                    const current: KeyValue = {
+                        screen_carousel: meta.state.screen_carousel ?? "OFF",
+                        screen_carousel_interval: meta.state.screen_carousel_interval ?? "5m",
+                        screen_page_time: meta.state.screen_page_time ?? "OFF",
+                        screen_page_temperature_history: meta.state.screen_page_temperature_history ?? "ON",
+                        screen_page_humidity_history: meta.state.screen_page_humidity_history ?? "ON",
+                        screen_page_memo: meta.state.screen_page_memo ?? "OFF",
+                    };
+                    const nextValue = {...current, ...partialValue};
+
+                    const carouselEnabled = nextValue.screen_carousel === "ON";
+                    const intervalMinutes = Number.parseInt(nextValue.screen_carousel_interval as string, 10);
+                    const pageIds: number[] = [0];
+                    for (const [index, name] of pageKeys.entries()) {
+                        if (nextValue[name] === "ON") pageIds.push(index + 1);
+                    }
+                    const configData = [carouselEnabled ? 1 : 0, intervalMinutes, pageIds.length, ...pageIds];
+                    const payload = [0x00, configData.length, ...configData];
+                    await entity.write<typeof clusterName, SonoffSnzb02ul>(
+                        clusterName,
+                        {
+                            [0x2031]: {value: {elementType: Zcl.DataType.UINT8, elements: payload}, type: Zcl.DataType.ARRAY},
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: nextValue};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffSnzb02ul>(clusterName, ["screenCarouselConfig"]);
+                },
+            },
+        ];
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
     },
     getCurrentWeatherInfo02UL: (): ModernExtend => {
         const clusterName = "customClusterEwelink";
@@ -13727,6 +13984,9 @@ export const definitions: DefinitionWithExtend[] = [
                     temperatureCalibration: {name: "temperatureCalibration", ID: 0x2003, type: Zcl.DataType.INT16, write: true},
                     humidityCalibration: {name: "humidityCalibration", ID: 0x2004, type: Zcl.DataType.INT16, write: true},
                     remoteSensorData: {name: "remoteSensorData", ID: 0x601e, type: Zcl.DataType.ARRAY, write: true},
+                    customDisplayComponentConfig: {name: "customDisplayComponentConfig", ID: 0x202f, type: Zcl.DataType.ARRAY, write: true},
+                    memoPageText: {name: "memoPageText", ID: 0x2030, type: Zcl.DataType.ARRAY, write: true},
+                    screenCarouselConfig: {name: "screenCarouselConfig", ID: 0x2031, type: Zcl.DataType.ARRAY, write: true},
                     longitude: {name: "longitude", ID: 0x5016, type: Zcl.DataType.INT32, write: true, min: -2147483648},
                     latitude: {name: "latitude", ID: 0x5017, type: Zcl.DataType.INT32, write: true, min: -2147483648},
                 },
@@ -13751,6 +14011,9 @@ export const definitions: DefinitionWithExtend[] = [
             sonoffExtend.temperatureHumidityCalculatedValues(),
             sonoffExtend.remoteSensorData(),
             sonoffExtend.getCurrentWeatherInfo02UL(),
+            withConditionalExpose(sonoffExtend.customDisplayComponentConfig(), featureGates.snzb02ul_screen_configuration),
+            withConditionalExpose(sonoffExtend.memoPageText(), featureGates.snzb02ul_screen_configuration),
+            withConditionalExpose(sonoffExtend.screenCarouselConfig(), featureGates.snzb02ul_screen_configuration),
             m.bindCluster({cluster: "genPollCtrl", clusterType: "input"}),
             m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
                 name: "comfort_temperature_min",
