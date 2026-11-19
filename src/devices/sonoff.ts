@@ -11876,7 +11876,6 @@ export const definitions: DefinitionWithExtend[] = [
             await endpoint1.read("customClusterEwelink", [0x0010, 0x0018, 0x0019], defaultResponseOptions);
             if (featureGates.zbm5_quick_click_action_event(device)) {
                 await endpoint1.read("customClusterEwelink", [0x002b], defaultResponseOptions);
-                await reporting.bind(endpoint2, coordinatorEndpoint, ["customClusterEwelink"]);
             }
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genOnOff"]);
             await reporting.onOff(endpoint2, {min: 1, max: 1805, change: 0});
@@ -11941,8 +11940,6 @@ export const definitions: DefinitionWithExtend[] = [
             await endpoint1.read("customClusterEwelink", [0x0010, 0x0018, 0x0019], defaultResponseOptions);
             if (featureGates.zbm5_quick_click_action_event(device)) {
                 await endpoint1.read("customClusterEwelink", [0x002b], defaultResponseOptions);
-                await reporting.bind(endpoint2, coordinatorEndpoint, ["customClusterEwelink"]);
-                await reporting.bind(endpoint3, coordinatorEndpoint, ["customClusterEwelink"]);
             }
             await reporting.bind(endpoint2, coordinatorEndpoint, ["genOnOff"]);
             await reporting.onOff(endpoint2, {min: 1, max: 1805, change: 0});
