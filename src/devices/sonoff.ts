@@ -9023,11 +9023,7 @@ const sonoffExtend = {
                     if (value === undefined) return;
 
                     utils.assertNumber(value);
-                    const result: KeyValue = {};
-                    for (const [index, key] of channelKeys.entries()) {
-                        result[key] = (value & (1 << index)) !== 0 ? "ON" : "OFF";
-                    }
-                    return result;
+                    return Object.fromEntries(channelKeys.map((key, index) => [key, (value & (1 << index)) !== 0 ? "ON" : "OFF"]));
                 },
             },
         ];
@@ -9041,13 +9037,12 @@ const sonoffExtend = {
 
                     // The suffix only names the channel; the bitmap itself always lives on endpoint 1.
                     const channelKey = key === baseKey ? `${baseKey}_${meta.endpoint_name}` : key;
-                    const index = channelKeys.indexOf(channelKey);
-                    if (index === -1) return;
+                    if (!channelKeys.includes(channelKey)) return;
 
                     // One byte holds every channel, so the bits of the other channels must be preserved.
                     const mask = channelKeys.reduce((acc, otherKey, bitIndex) => {
-                        const bit = otherKey === channelKey ? (value === "ON" ? 1 : 0) : meta.state?.[otherKey] === "ON" ? 1 : 0;
-                        return acc | (bit << bitIndex);
+                        const isOn = (otherKey === channelKey ? value : meta.state?.[otherKey]) === "ON";
+                        return isOn ? acc | (1 << bitIndex) : acc;
                     }, 0);
 
                     const endpoint1 = meta.device.getEndpoint(1);
