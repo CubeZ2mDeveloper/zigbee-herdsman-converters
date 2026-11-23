@@ -1518,14 +1518,12 @@ const featureGates = {
     // Unknown firmware retains the legacy display controls, matching the original firmwareAtLeast fallback.
     snzb02dr2_legacy_remote_source: (device: Zh.Device): boolean => !featureGates.snzb02dr2_support_remote_source(device),
     snzb02dr2_support_remote_source: firmwareSupportFeaturesVersion("1.0.5", "higher"),
-    // Unknown firmware leaves both remote-temperature exposes unavailable.
-    trvzbl_support_multi_temperature: firmwareSupportFeaturesVersion("1.0.5", "higher", {modelID: "TRV-ZBL"}),
+    // Expose multiple remote temperature inputs and valve direct control. Also read the direct control attribute during setup.
+    trvzbl_support_iteration: firmwareSupportFeaturesVersion("1.0.5", "higher", {modelID: "TRV-ZBL"}),
+    // Expose the legacy single remote temperature input below the same firmware threshold.
     trvzbl_support_single_temperature: firmwareSupportFeaturesVersion("1.0.5", "lower", {modelID: "TRV-ZBL"}),
-    trvzbl_support_valve_direct_control: firmwareSupportFeaturesVersion("1.0.5", "higher", {modelID: "TRV-ZBL"}),
-    tpwgzba_support_occupancy: firmwareSupportFeaturesVersion("1.0.6", "higher", {modelID: "TP-WGZBA"}),
-    tpwgzba_support_anti_stuck: firmwareSupportFeaturesVersion("1.0.6", "higher", {modelID: "TP-WGZBA"}),
-    tpwgzba_support_screen_temperature_display: firmwareSupportFeaturesVersion("1.0.6", "higher", {modelID: "TP-WGZBA"}),
-    tpwgzba_support_holiday: firmwareSupportFeaturesVersion("1.0.6", "higher", {modelID: "TP-WGZBA"}),
+    // Expose anti-stuck scheduling, holiday mode, radar occupancy and its timeout, and screen temperature selection.
+    tpwgzba_support_iteration: firmwareSupportFeaturesVersion("1.0.6", "higher", {modelID: "TP-WGZBA"}),
     zbminir2_external_switch_actions: firmwareSupportFeaturesVersion("1.1.0", "higher", {modelID: "ZBMINIR2"}),
     zbminil2_external_switch_trigger_mode: firmwareSupportFeaturesVersion("1.0.19", "higher", {modelID: "ZBMINIL2"}),
     zbrbs_single_switch_mode: firmwareSupportFeaturesVersion("1.2.0", "higher", {modelID: "MINI-ZBRBS"}),
@@ -11277,7 +11275,7 @@ export const definitions: DefinitionWithExtend[] = [
             sonoffExtend.tpWgzbaTemporaryMode(),
             sonoffExtend.remoteTemperatureSource("customClusterEwelink"),
             sonoffExtend.tpWgzbaTemperatureHysteresis(),
-            withConditionalExpose(sonoffExtend.tpWgzbaAntiStuck(), featureGates.tpwgzba_support_anti_stuck),
+            withConditionalExpose(sonoffExtend.tpWgzbaAntiStuck(), featureGates.tpwgzba_support_iteration),
             withConditionalExpose(
                 m.binary<"customClusterEwelink", SonoffTpWgzba>({
                     name: "holiday_enabled",
@@ -11290,9 +11288,9 @@ export const definitions: DefinitionWithExtend[] = [
                     valueOn: [true, 0x01],
                     valueOff: [false, 0x00],
                 }),
-                featureGates.tpwgzba_support_holiday,
+                featureGates.tpwgzba_support_iteration,
             ),
-            withConditionalExpose(sonoffExtend.holidaySchedule({canSelectHeatingBehavior: false}), featureGates.tpwgzba_support_holiday),
+            withConditionalExpose(sonoffExtend.holidaySchedule({canSelectHeatingBehavior: false}), featureGates.tpwgzba_support_iteration),
             sonoffExtend.tpWgzbaRelayOutput(),
             sonoffExtend.tpWgzbaNtcTemperature(),
             m.binary<"customClusterEwelink", SonoffTpWgzba>({
@@ -11341,7 +11339,7 @@ export const definitions: DefinitionWithExtend[] = [
                     valueMax: 3600,
                     unit: "s",
                 }),
-                featureGates.tpwgzba_support_occupancy,
+                featureGates.tpwgzba_support_iteration,
             ),
             m.enumLookup<"customClusterEwelink", SonoffTpWgzba>({
                 name: "radar_sensitivity",
@@ -11371,7 +11369,7 @@ export const definitions: DefinitionWithExtend[] = [
                     description:
                         "Shows Occupied when the thermostat’s radar detects someone within range. Presence detection is paused when radar detection is disabled or Radar Do Not Disturb is active.",
                 }),
-                featureGates.tpwgzba_support_occupancy,
+                featureGates.tpwgzba_support_iteration,
             ),
             withConditionalExpose(
                 m.enumLookup<"customClusterEwelink", SonoffTpWgzba>({
@@ -11383,7 +11381,7 @@ export const definitions: DefinitionWithExtend[] = [
                     description:
                         "Choose whether the screen shows the room temperature or the set temperature. The screen shows the room temperature by default. Press the thermostat button twice to switch between the two.",
                 }),
-                featureGates.tpwgzba_support_screen_temperature_display,
+                featureGates.tpwgzba_support_iteration,
             ),
             m.numeric<"customClusterEwelink", SonoffTpWgzba>({
                 name: "standby_brightness",
@@ -11592,7 +11590,7 @@ export const definitions: DefinitionWithExtend[] = [
                 scale: 100,
             }),
             withConditionalExpose(sonoffExtend.remoteTemperatureSource("customClusterEwelink"), featureGates.trvzbl_support_single_temperature),
-            withConditionalExpose(sonoffExtend.remoteTemperatureSources(5), featureGates.trvzbl_support_multi_temperature),
+            withConditionalExpose(sonoffExtend.remoteTemperatureSources(5), featureGates.trvzbl_support_iteration),
             m.enumLookup<"customClusterEwelink", SonoffTrvzbt>({
                 name: "device_work_mode",
                 lookup: {
@@ -11779,7 +11777,7 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOff: [false, 0x00],
             }),
             sonoffExtend.holidaySchedule({canSelectHeatingBehavior: true}),
-            withConditionalExpose(sonoffExtend.valveControl(), featureGates.trvzbl_support_valve_direct_control),
+            withConditionalExpose(sonoffExtend.valveControl(), featureGates.trvzbl_support_iteration),
             sonoffExtend.motorTravelCalibrationStatus(),
         ],
         ota: true,
@@ -11811,7 +11809,7 @@ export const definitions: DefinitionWithExtend[] = [
                 "holidayEnable",
                 "holidaySchedule",
             ];
-            if (featureGates.trvzbl_support_valve_direct_control(device)) {
+            if (featureGates.trvzbl_support_iteration(device)) {
                 customAttributes.push("valveDirectControl");
             }
             await readAttributesInBatches<"customClusterEwelink", SonoffTrvzbt>("customClusterEwelink", customAttributes, endpoint);
