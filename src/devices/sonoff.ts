@@ -1,4 +1,4 @@
-import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
+﻿import {getTimeClusterAttributes, Zcl} from "zigbee-herdsman";
 import * as fz from "../converters/fromZigbee";
 import * as tz from "../converters/toZigbee";
 import * as constants from "../lib/constants";
@@ -386,6 +386,9 @@ interface SonoffSnzb02ul {
         humidityCalibration: number;
         longitude: number;
         latitude: number;
+        customDisplayComponentConfig: number[];
+        memoPageText: number[];
+        screenCarouselConfig: number[];
     };
     commands: {
         getCurrentWeatherInfo: {data: number[]};
@@ -1502,6 +1505,7 @@ const featureGates = {
     // Unknown firmware retains the legacy display controls, matching the original firmwareAtLeast fallback.
     snzb02dr2_legacy_remote_source: (device: Zh.Device): boolean => !featureGates.snzb02dr2_support_remote_source(device),
     snzb02dr2_support_remote_source: firmwareSupportFeaturesVersion("1.0.5", "higher"),
+    snzb02ul_1_0_4_features: firmwareSupportFeaturesVersion("1.0.4", "higher", {modelID: "SNZB-02UL"}),
     zbminir2_external_switch_actions: firmwareSupportFeaturesVersion("1.1.0", "higher", {modelID: "ZBMINIR2"}),
     zbminil2_external_switch_trigger_mode: firmwareSupportFeaturesVersion("1.0.19", "higher", {modelID: "ZBMINIL2"}),
     zbrbs_single_switch_mode: firmwareSupportFeaturesVersion("1.2.0", "higher", {modelID: "MINI-ZBRBS"}),
@@ -4197,35 +4201,90 @@ const sonoffExtend = {
     },
     remoteSensorData: (): ModernExtend => {
         const clusterName = "customClusterEwelink";
-        const ATTR_ID = 0x601e;
+        const attributeId = 0x601e;
+        const mainScreenSensorId = 0;
+        const enabledState = 0x01;
+        const disabledState = 0x00;
 
-        const STATE_CODE: Record<string, number> = {enable: 0x01, disable: 0x00};
+        type SensorEncoding = {
+            type: number;
+            bytes: 2 | 4;
+            signed: boolean;
+            scale: number;
+            units?: string[];
+        };
 
-        const buildItem = (sensorType: number, sensorState: number, valueLen: number, writeFn?: (buf: Buffer, offset: number) => void): Buffer => {
-            const item = Buffer.alloc(4 + valueLen);
+        const buildSensorDataItem = (
+            sensorType: number,
+            sensorId: number,
+            state: number,
+            valueLength = 0,
+            writeValue?: (buffer: Buffer, offset: number) => void,
+        ): Buffer => {
+            if (!Number.isInteger(sensorId)) throw new Error(`Sensor ID must be an integer, got ${sensorId}`);
+            const item = Buffer.alloc(4 + valueLength);
             item[0] = sensorType;
-            item[1] = 0x00; // SensorId (default 0)
-            item[2] = sensorState;
-            item[3] = valueLen;
-            if (valueLen > 0 && writeFn) writeFn(item, 4);
+            item.writeUInt8(sensorId, 1);
+            item[2] = state;
+            item[3] = valueLength;
+            writeValue?.(item, 4);
             return item;
         };
 
-        const writePayload = async (entity: Zh.Endpoint | Zh.Group, items: Buffer[], meta: Tz.Meta) => {
-            const totalItemBytes = items.reduce((sum, item) => sum + item.length, 0);
-            const L = 1 + totalItemBytes;
-            const header = [0x01, 0x01, 0x00, 0x03, L, items.length];
-            const payload = [...header, ...items.flatMap((item) => Array.from(item))];
+        const buildNumericSensorItem = (sensor: SensorEncoding, value: unknown, sensorId: number, unitName?: unknown): Buffer => {
+            const unitCode = sensor.units ? Math.max(sensor.units.indexOf(unitName as string), 0) : undefined;
+            const unitLength = unitCode === undefined ? 0 : 1;
+            const scaled = Math.round((value as number) * sensor.scale);
+
+            return buildSensorDataItem(sensor.type, sensorId, enabledState, unitLength + sensor.bytes, (buffer, offset) => {
+                if (unitCode !== undefined) buffer.writeUInt8(unitCode, offset);
+                if (sensor.signed) buffer.writeIntLE(scaled, offset + unitLength, sensor.bytes);
+                else buffer.writeUIntLE(scaled, offset + unitLength, sensor.bytes);
+            });
+        };
+
+        const writeSensorData = async (entity: Zh.Endpoint | Zh.Group, items: Buffer[], meta: Tz.Meta) => {
+            const valueLength = 1 + items.reduce((total, item) => total + item.length, 0);
+            const payload = [0x01, 0x01, 0x00, 0x03, valueLength, items.length, ...items.flatMap((item) => Array.from(item))];
             await entity.write(
                 clusterName,
-                {[ATTR_ID]: {value: {elementType: Zcl.DataType.UINT8, elements: payload}, type: Zcl.DataType.ARRAY}},
+                {[attributeId]: {value: {elementType: Zcl.DataType.UINT8, elements: payload}, type: Zcl.DataType.ARRAY}},
                 utils.getOptions(meta.mapped, entity),
             );
         };
 
-        const isOnline = (meta: Tz.Meta): boolean => meta.state.remote_sensors_state !== "disable";
+        const isCachedValue = (value: unknown): boolean => value !== undefined && value !== null;
 
-        const exposes = [
+        const mainPressureUnits = ["hPa", "mmHg"];
+        const mainPressureEncoding: SensorEncoding = {type: 0x04, bytes: 4, signed: true, scale: 100, units: mainPressureUnits};
+        const customPagePressureEncoding: SensorEncoding = {type: 0x04, bytes: 4, signed: true, scale: 100, units: ["hPa", "mmHg", "kPa"]};
+
+        // ---- Main screen (sensor ID 0) ----
+        const mainTemperature: SensorEncoding = {type: 0x00, bytes: 2, signed: true, scale: 100};
+        const mainHumidity: SensorEncoding = {type: 0x01, bytes: 2, signed: false, scale: 100};
+        const legacyMainPressure: SensorEncoding = {type: 0x02, bytes: 4, signed: true, scale: 100};
+        const supportsPressureUnit = (meta: Tz.Meta): boolean => featureGates.snzb02ul_1_0_4_features(meta.device);
+        const getMainPressure = (meta: Tz.Meta): SensorEncoding => (supportsPressureUnit(meta) ? mainPressureEncoding : legacyMainPressure);
+
+        const isRemoteSensorEnabled = (meta: Tz.Meta): boolean => meta.state.remote_sensors_state !== "disable";
+
+        const writeMainScreenValue = async (
+            entity: Zh.Endpoint | Zh.Group,
+            meta: Tz.Meta,
+            sensor: SensorEncoding,
+            value: unknown,
+            unitName?: unknown,
+        ) => {
+            if (!isRemoteSensorEnabled(meta)) return;
+            await writeSensorData(entity, [buildNumericSensorItem(sensor, value, mainScreenSensorId, unitName)], meta);
+        };
+
+        const pressureUnitExpose = e
+            .enum("remote_pressure_unit", ea.STATE_SET, ["mmHg", "hPa"])
+            .withCategory("config")
+            .withDescription("Unit used for remote pressure displayed on the main screen.");
+
+        const exposes: (Expose | DefinitionExposesFunction)[] = [
             e
                 .enum("remote_sensors_state", ea.STATE_SET, ["enable", "disable"])
                 .withDescription(
@@ -4234,18 +4293,18 @@ const sonoffExtend = {
                 .withCategory("config"),
             e
                 .numeric("remote_temperature", ea.STATE_SET)
-                .withValueMin(-20)
+                .withValueMin(-50)
                 .withValueMax(60)
                 .withUnit("°C")
                 .withValueStep(0.1)
                 .withDescription(
-                    "Remote temperature value displayed on the E-ink screen. Note: wake up the device by pressing the button on the back before changing this value.",
+                    "Remote temperature value displayed on the E-ink screen. Note: Wake up the device by pressing the button on the back before changing this value.The configurable range is -50°C to 60°C. Please ensure the selected value is within the remote sensor's recommended operating temperature range.",
                 )
                 .withCategory("config"),
             e
                 .numeric("remote_humidity", ea.STATE_SET)
-                .withValueMin(5)
-                .withValueMax(95)
+                .withValueMin(1)
+                .withValueMax(99)
                 .withUnit("%")
                 .withDescription(
                     "Remote humidity value displayed on the E-ink screen. Note: wake up the device by pressing the button on the back before changing this value.",
@@ -4253,68 +4312,481 @@ const sonoffExtend = {
                 .withCategory("config"),
             e
                 .numeric("remote_pressure", ea.STATE_SET)
-                .withValueMin(700)
-                .withValueMax(1100)
-                .withUnit("hPa")
+                .withValueMin(525)
+                .withValueMax(975)
+                .withUnit("mmHg")
                 .withValueStep(0.1)
                 .withDescription(
                     "Remote atmospheric pressure value displayed on the E-ink screen. Note: wake up the device by pressing the button on the back before changing this value.",
                 )
                 .withCategory("config"),
+            (device) => (utils.isDummyDevice(device) || featureGates.snzb02ul_1_0_4_features(device) ? [pressureUnitExpose] : []),
         ];
 
-        const toZigbee: Tz.Converter[] = [
+        const mainScreenConverters: Tz.Converter[] = [
             {
                 key: ["remote_temperature"],
-                convertSet: async (entity, key, value, meta) => {
-                    if (!isOnline(meta)) {
-                        return {state: {remote_temperature: value}};
-                    }
-                    const scaled = Math.round((value as number) * 100);
-                    await writePayload(entity, [buildItem(0x00, 0x01, 2, (buf, offset) => buf.writeInt16LE(scaled, offset))], meta);
+                convertSet: async (entity, _key, value, meta) => {
+                    await writeMainScreenValue(entity, meta, mainTemperature, value);
                     return {state: {remote_temperature: value}};
                 },
             },
             {
                 key: ["remote_humidity"],
-                convertSet: async (entity, key, value, meta) => {
-                    if (!isOnline(meta)) {
-                        return {state: {remote_humidity: value}};
-                    }
-                    const scaled = Math.round((value as number) * 100);
-                    await writePayload(entity, [buildItem(0x01, 0x01, 2, (buf, offset) => buf.writeUInt16LE(scaled, offset))], meta);
+                convertSet: async (entity, _key, value, meta) => {
+                    await writeMainScreenValue(entity, meta, mainHumidity, value);
                     return {state: {remote_humidity: value}};
                 },
             },
             {
                 key: ["remote_pressure"],
-                convertSet: async (entity, key, value, meta) => {
-                    if (!isOnline(meta)) {
-                        return {state: {remote_pressure: value}};
-                    }
-                    const scaled = Math.round((value as number) * 100);
-                    await writePayload(entity, [buildItem(0x02, 0x01, 4, (buf, offset) => buf.writeInt32LE(scaled, offset))], meta);
+                convertSet: async (entity, _key, value, meta) => {
+                    await writeMainScreenValue(entity, meta, getMainPressure(meta), value, meta.state.remote_pressure_unit ?? "mmHg");
                     return {state: {remote_pressure: value}};
                 },
             },
             {
-                key: ["remote_sensors_state"],
-                convertSet: async (entity, key, value, meta) => {
-                    if (value === "enable") {
-                        return {state: {remote_sensors_state: value}};
+                key: ["remote_pressure_unit"],
+                convertSet: async (entity, _key, value, meta) => {
+                    if (!supportsPressureUnit(meta)) throw new Error("remote_pressure_unit requires SNZB-02UL firmware 1.0.4 or later");
+
+                    const cachedValue = meta.state.remote_pressure;
+                    if (isRemoteSensorEnabled(meta) && isCachedValue(cachedValue)) {
+                        await writeSensorData(entity, [buildNumericSensorItem(mainPressureEncoding, cachedValue, mainScreenSensorId, value)], meta);
                     }
-                    const stateCode = STATE_CODE[value as string] ?? 0x01;
-                    await writePayload(
-                        entity,
-                        [0x00, 0x01, 0x02].map((type) => buildItem(type, stateCode, 0)),
-                        meta,
-                    );
+                    return {state: {remote_pressure_unit: value}};
+                },
+            },
+            {
+                key: ["remote_sensors_state"],
+                convertSet: async (entity, _key, value, meta) => {
+                    if (value !== "enable" && value !== "disable") throw new Error("remote_sensors_state only supports enable or disable");
+                    if (value === "disable") {
+                        const items = [mainTemperature, mainHumidity, getMainPressure(meta)].map((sensor) =>
+                            buildSensorDataItem(sensor.type, mainScreenSensorId, disabledState),
+                        );
+                        await writeSensorData(entity, items, meta);
+                    }
                     return {state: {remote_sensors_state: value}};
                 },
             },
         ];
 
+        // ---- Custom page: one converter per sensor, driven by one self-contained object ----
+        type CustomPageSensor = {
+            key: string;
+            sensorType: number;
+            encode: (command: KeyValue, sensorId: number) => {item: Buffer; encodedState: KeyValue};
+        };
+
+        const createCustomPageConverter = ({key, sensorType, encode}: CustomPageSensor): Tz.Converter => ({
+            key: [key],
+            convertSet: async (entity, _key, value, meta) => {
+                const command = value as KeyValue;
+                const sensorId = command.id as number;
+
+                if (command.state === "unbound") {
+                    await writeSensorData(entity, [buildSensorDataItem(sensorType, sensorId, disabledState)], meta);
+                    return {state: {[key]: {id: sensorId, state: "unbound"}}};
+                }
+
+                const {item, encodedState} = encode(command, sensorId);
+                await writeSensorData(entity, [item], meta);
+                return {state: {[key]: {id: sensorId, ...encodedState}}};
+            },
+        });
+
+        // ---- Custom page: numeric sensors (one value, optional unit) ----
+        type NumericSensor = SensorEncoding & {key: string};
+
+        const numericSensors: NumericSensor[] = [
+            {key: "remote_pressure_custom_page", ...customPagePressureEncoding},
+            {key: "remote_temperature_custom_page", type: 0x03, bytes: 2, signed: true, scale: 100, units: ["celsius", "fahrenheit"]},
+            {key: "remote_humidity_custom_page", type: 0x01, bytes: 2, signed: false, scale: 100},
+            {key: "remote_pm25", type: 0x05, bytes: 4, signed: true, scale: 10, units: ["µg/m³", "mg/m³"]},
+            {key: "remote_pm10", type: 0x06, bytes: 4, signed: true, scale: 10, units: ["µg/m³", "mg/m³"]},
+            {key: "remote_tvoc", type: 0x07, bytes: 4, signed: true, scale: 10, units: ["ppm", "ppb", "mg/m³"]},
+            {key: "remote_soil_moisture", type: 0x08, bytes: 2, signed: false, scale: 10, units: ["%"]},
+            {key: "remote_power", type: 0x09, bytes: 4, signed: true, scale: 10, units: ["W", "kW"]},
+            {key: "remote_water", type: 0x0a, bytes: 4, signed: false, scale: 10, units: ["m³", "L", "us_gallon", "imperial_gallon"]},
+            {key: "remote_voltage", type: 0x0b, bytes: 4, signed: true, scale: 10, units: ["V", "mV"]},
+            {key: "remote_current", type: 0x0c, bytes: 4, signed: true, scale: 10, units: ["A", "mA"]},
+            {key: "remote_battery", type: 0x0d, bytes: 2, signed: false, scale: 10, units: ["%"]},
+            {key: "remote_energy", type: 0x0e, bytes: 4, signed: false, scale: 10, units: ["kWh", "Wh", "MWh"]},
+            {key: "remote_co2", type: 0x0f, bytes: 4, signed: true, scale: 10, units: ["ppm"]},
+        ];
+
+        const createNumericSensorConverter = (sensor: NumericSensor): Tz.Converter => {
+            const hasUnitCommand = sensor.units !== undefined && sensor.units.length > 1;
+
+            return createCustomPageConverter({
+                key: sensor.key,
+                sensorType: sensor.type,
+                encode: (command, sensorId) => {
+                    const value = command.value as number;
+                    const unitName = hasUnitCommand ? (command.unit as string) : undefined;
+
+                    return {
+                        item: buildNumericSensorItem(sensor, value, sensorId, unitName),
+                        encodedState: {value, ...(unitName === undefined ? {} : {unit: unitName})},
+                    };
+                },
+            });
+        };
+
+        // ---- Custom page: Light and Climate (several fields share one item and ID) ----
+        const lightSensorType = 0x20;
+
+        const parseLightPower = (value: unknown): string => {
+            if (value !== "ON" && value !== "OFF") throw new Error(`Invalid power: expected ON or OFF, got ${value}`);
+            return value;
+        };
+
+        const lightConverter = createCustomPageConverter({
+            key: "remote_light",
+            sensorType: lightSensorType,
+            encode: (command, sensorId) => {
+                const power = command.power === undefined ? undefined : parseLightPower(command.power);
+                const brightness = (command.brightness === 255 ? 254 : command.brightness) as number | undefined;
+                const fields = Object.fromEntries(Object.entries({power, brightness}).filter(([, value]) => value !== undefined));
+                const item = buildSensorDataItem(lightSensorType, sensorId, enabledState, 4, (buffer, offset) => {
+                    let validMask = 0;
+                    if (power !== undefined) {
+                        validMask |= 0x01;
+                        buffer.writeUInt8(power === "ON" ? 0x01 : 0x00, offset + 1);
+                    }
+                    if (brightness !== undefined) {
+                        validMask |= 0x02;
+                        buffer.writeUInt16LE(Math.round((brightness / 254) * 1000), offset + 2);
+                    }
+                    buffer.writeUInt8(validMask, offset);
+                });
+
+                return {item, encodedState: fields};
+            },
+        });
+
+        const climateSensorType = 0x21;
+        const climateModeCodes: Record<string, number> = {off: 0x00, heat: 0x01, cool: 0x02, auto: 0x03, dry: 0x04};
+
+        const climateConverter = createCustomPageConverter({
+            key: "remote_climate",
+            sensorType: climateSensorType,
+            encode: (command, sensorId) => {
+                const localTemperature = command.local_temperature as number | undefined;
+                const setpoint = command.occupied_heating_setpoint as number | undefined;
+                const systemMode = command.system_mode as string | undefined;
+                const valveOpening = command.valve_opening as number | undefined;
+                const fields = Object.fromEntries(
+                    Object.entries({
+                        local_temperature: localTemperature,
+                        occupied_heating_setpoint: setpoint,
+                        system_mode: systemMode,
+                        valve_opening: valveOpening,
+                    }).filter(([, value]) => value !== undefined),
+                );
+                const item = buildSensorDataItem(climateSensorType, sensorId, enabledState, 8, (buffer, offset) => {
+                    let validMask = 0;
+                    if (localTemperature !== undefined) {
+                        validMask |= 0x01;
+                        buffer.writeInt16LE(Math.round(localTemperature * 10), offset + 1);
+                    }
+                    if (setpoint !== undefined) {
+                        validMask |= 0x02;
+                        buffer.writeInt16LE(Math.round(setpoint * 10), offset + 3);
+                    }
+                    if (systemMode !== undefined) {
+                        validMask |= 0x04;
+                        buffer.writeUInt8(climateModeCodes[systemMode], offset + 5);
+                    }
+                    if (valveOpening !== undefined) {
+                        validMask |= 0x08;
+                        buffer.writeUInt16LE(Math.round(valveOpening * 10), offset + 6);
+                    }
+                    buffer.writeUInt8(validMask, offset);
+                });
+
+                return {item, encodedState: fields};
+            },
+        });
+
+        const toZigbee: Tz.Converter[] = [
+            ...mainScreenConverters,
+            ...numericSensors.map(createNumericSensorConverter),
+            lightConverter,
+            climateConverter,
+        ];
+
         return {exposes, fromZigbee: [], toZigbee, isModernExtend: true};
+    },
+    customDisplayComponentConfig: (): ModernExtend => {
+        const clusterName = "customClusterEwelink";
+        const componentNames = ["screen_comfort", "screen_time", "screen_date", "screen_weather"];
+        const componentDescription = "Show this component on the main screen. If the component is disabled, it will not be shown on any page.";
+        const exposes = [
+            ...componentNames.map((name) =>
+                e
+                    .binary(name, ea.ALL, "ON", "OFF")
+                    .withCategory("config")
+                    .withDescription(
+                        name === "screen_time"
+                            ? `${componentDescription} If the time component is disabled, it will not be displayed on the Time page either！`
+                            : componentDescription,
+                    ),
+            ),
+            e
+                .enum("screen_time_format", ea.ALL, ["12h", "24h"])
+                .withCategory("config")
+                .withDescription("Choose whether the time is displayed in 12-hour or 24-hour format."),
+        ];
+        const keys = exposes.map((expose) => expose.property);
+
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffSnzb02ul, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (!msg.data.customDisplayComponentConfig) return;
+                    const array = new Uint8Array(msg.data.customDisplayComponentConfig);
+                    const type = array[0];
+                    const componentCount = array[3];
+                    const state: KeyValue = {};
+                    if (type === 0x00) {
+                        let offset = 4;
+                        for (let i = 0; i < componentCount; i++) {
+                            const [componentType, _componentId, componentState, valueLength] = array.slice(offset, offset + 4);
+                            state[componentNames[componentType]] = componentState === 1 ? "ON" : "OFF";
+                            if (componentType === 0x01 && valueLength > 0) {
+                                const value = array[offset + 4];
+                                const formats = ["12h", "24h"];
+                                state.screen_time_format = formats[value];
+                            }
+                            offset += 4 + valueLength;
+                        }
+                    }
+                    return state;
+                },
+            },
+        ];
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: keys,
+                convertSet: async (entity, key, value, meta) => {
+                    const partialValue: KeyValue = {};
+                    partialValue[key] = value;
+                    const current: KeyValue = {
+                        screen_comfort: meta.state.screen_comfort ?? "ON",
+                        screen_time: meta.state.screen_time ?? "ON",
+                        screen_date: meta.state.screen_date ?? "ON",
+                        screen_weather: meta.state.screen_weather ?? "ON",
+                        screen_time_format: meta.state.screen_time_format ?? "24h",
+                    };
+                    const nextValue = {...current, ...partialValue};
+                    const array = [0, 2, 0, 0];
+                    for (const [componentType, name] of componentNames.entries()) {
+                        if (name in nextValue) {
+                            const componentState = nextValue[name] === "ON" ? 1 : 0;
+                            const componentValue: number[] = [];
+                            if (componentType === 0x01 && nextValue.screen_time_format !== undefined) {
+                                const format = nextValue.screen_time_format === "24h" ? 1 : 0;
+                                componentValue.push(format);
+                            }
+                            array.push(componentType, 0, componentState, componentValue.length, ...componentValue);
+                            array[1] += 4 + componentValue.length;
+                            array[3]++;
+                        }
+                    }
+                    await entity.write<typeof clusterName, SonoffSnzb02ul>(
+                        clusterName,
+                        {
+                            [0x202f]: {value: {elementType: Zcl.DataType.UINT8, elements: array}, type: Zcl.DataType.ARRAY},
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: nextValue};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffSnzb02ul>(clusterName, ["customDisplayComponentConfig"]);
+                },
+            },
+        ];
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
+    },
+    notePageText: (): ModernExtend => {
+        const clusterName = "customClusterEwelink";
+        const lineKeys = ["note_page_text_1", "note_page_text_2", "note_page_text_3", "note_page_text_4"];
+        const exposes = [
+            ...lineKeys.map((key) =>
+                e
+                    .text(key, ea.ALL)
+                    .withCategory("config")
+                    .withDescription(
+                        "Note text. Max 60 characters (15 per line). Allowed: A–Z, a–z, 0–9, and , . ? ! : ` - & · . Entering incompatible characters may cause them not to be displayed on the device.",
+                    ),
+            ),
+            e
+                .enum("note_text_alignment", ea.ALL, ["left", "center"])
+                .withCategory("config")
+                .withDescription("Horizontal alignment of the note text."),
+        ];
+        const keys = exposes.map((expose) => expose.property);
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffSnzb02ul, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (!msg.data.memoPageText) return;
+                    const array = new Uint8Array(msg.data.memoPageText);
+                    const type = array[0];
+                    const lineCount = array[2];
+                    const textAlignment = array[3];
+                    const state: KeyValue = {};
+                    if (type === 0x00) {
+                        const lines = Array.from({length: lineKeys.length}, () => "");
+                        let offset = 5;
+                        for (let i = 0; i < Math.min(lineCount, lineKeys.length); i++) {
+                            const lineLength = array[offset] ?? 0;
+                            offset++;
+                            lines[i] = Buffer.from(array.slice(offset, offset + lineLength)).toString("ascii");
+                            offset += lineLength;
+                        }
+                        for (const [index, key] of lineKeys.entries()) state[key] = lines[index];
+                        state.note_text_alignment = textAlignment === 1 ? "center" : "left";
+                    }
+                    return state;
+                },
+            },
+        ];
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: keys,
+                convertSet: async (entity, key, value, meta) => {
+                    const partialValue: KeyValue = {};
+                    partialValue[key] = value;
+                    const current: KeyValue = {
+                        ...Object.fromEntries(lineKeys.map((lineKey) => [lineKey, meta.state[lineKey] ?? ""])),
+                        note_text_alignment: meta.state.note_text_alignment ?? "center",
+                    };
+                    const nextValue = {...current, ...partialValue};
+
+                    const lines = lineKeys.map((lineKey) => {
+                        const line = String(nextValue[lineKey]);
+                        if (line.length > 15 || /[^\x20-\x7e]/.test(line)) {
+                            throw new Error(`Invalid ${lineKey}: maximum 15 printable ASCII characters`);
+                        }
+                        return line;
+                    });
+                    while (lines.at(-1) === "") lines.pop();
+                    const textAlignment = nextValue.note_text_alignment === "center" ? 1 : 0;
+                    const array = [0, 3, 0, textAlignment, 0];
+                    for (const line of lines) {
+                        const lineValue = Buffer.from(line, "ascii");
+                        array.push(lineValue.length, ...lineValue);
+                        array[1] += 1 + lineValue.length;
+                        array[2]++;
+                    }
+                    await entity.write<typeof clusterName, SonoffSnzb02ul>(
+                        clusterName,
+                        {
+                            [0x2030]: {value: {elementType: Zcl.DataType.UINT8, elements: array}, type: Zcl.DataType.ARRAY},
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: nextValue};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffSnzb02ul>(clusterName, ["memoPageText"]);
+                },
+            },
+        ];
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
+    },
+    screenCarouselConfig: (): ModernExtend => {
+        const clusterName = "customClusterEwelink";
+        const pageKeys = [
+            "screen_page_time",
+            "screen_page_temperature_history",
+            "screen_page_humidity_history",
+            "screen_page_note",
+            "screen_page_custom_1",
+            "screen_page_custom_2",
+        ];
+        const exposes = [
+            e
+                .binary("screen_carousel", ea.ALL, "ON", "OFF")
+                .withCategory("config")
+                .withDescription("Enable automatic cycling through the selected pages. The main page is always included."),
+            e
+                .enum("screen_carousel_interval", ea.ALL, ["3m", "5m", "10m"])
+                .withCategory("config")
+                .withDescription("Time to show each page before moving to the next (3, 5, or 10 minutes)."),
+            ...pageKeys.map((name) =>
+                e
+                    .binary(name, ea.ALL, "ON", "OFF")
+                    .withCategory("config")
+                    .withDescription(
+                        "Include this page in carousel cycling and button-controlled page switching. Page order: main, time, temperature history, humidity history, note.",
+                    ),
+            ),
+        ];
+        const keys = exposes.map((expose) => expose.property);
+        const fromZigbee: Fz.Converter<typeof clusterName, SonoffSnzb02ul, ["attributeReport", "readResponse"]>[] = [
+            {
+                cluster: clusterName,
+                type: ["attributeReport", "readResponse"],
+                convert: (model, msg) => {
+                    if (!msg.data.screenCarouselConfig) return;
+                    const array = new Uint8Array(msg.data.screenCarouselConfig);
+                    const payload = array.slice(2);
+                    const [enabled, interval, pageCount] = payload;
+                    const pages = payload.slice(3, 3 + pageCount);
+                    const state: KeyValue = {screen_carousel: enabled === 1 ? "ON" : "OFF", screen_carousel_interval: `${interval}m`};
+                    for (const [id, name] of pageKeys.entries()) state[name] = pages.includes(id + 1) ? "ON" : "OFF";
+                    return state;
+                },
+            },
+        ];
+        const toZigbee: Tz.Converter[] = [
+            {
+                key: keys,
+                convertSet: async (entity, key, value, meta) => {
+                    const partialValue: KeyValue = {};
+                    partialValue[key] = value;
+                    const current: KeyValue = {
+                        screen_carousel: meta.state.screen_carousel ?? "OFF",
+                        screen_carousel_interval: meta.state.screen_carousel_interval ?? "5m",
+                        screen_page_time: meta.state.screen_page_time ?? "OFF",
+                        screen_page_temperature_history: meta.state.screen_page_temperature_history ?? "ON",
+                        screen_page_humidity_history: meta.state.screen_page_humidity_history ?? "ON",
+                        screen_page_note: meta.state.screen_page_note ?? "OFF",
+                        screen_page_custom_1: meta.state.screen_page_custom_1 ?? "OFF",
+                        screen_page_custom_2: meta.state.screen_page_custom_2 ?? "OFF",
+                    };
+                    const nextValue = {...current, ...partialValue};
+
+                    const carouselEnabled = nextValue.screen_carousel === "ON";
+                    const intervalMinutes = Number.parseInt(nextValue.screen_carousel_interval as string, 10);
+                    const pageIds: number[] = [0];
+                    for (const [index, name] of pageKeys.entries()) {
+                        if (nextValue[name] === "ON") pageIds.push(index + 1);
+                    }
+                    const configData = [carouselEnabled ? 1 : 0, intervalMinutes, pageIds.length, ...pageIds];
+                    const payload = [0x00, configData.length, ...configData];
+                    await entity.write<typeof clusterName, SonoffSnzb02ul>(
+                        clusterName,
+                        {
+                            [0x2031]: {value: {elementType: Zcl.DataType.UINT8, elements: payload}, type: Zcl.DataType.ARRAY},
+                        },
+                        utils.getOptions(meta.mapped, entity),
+                    );
+                    return {state: nextValue};
+                },
+                convertGet: async (entity) => {
+                    await entity.read<typeof clusterName, SonoffSnzb02ul>(clusterName, ["screenCarouselConfig"]);
+                },
+            },
+        ];
+        return {exposes, fromZigbee, toZigbee, isModernExtend: true};
     },
     getCurrentWeatherInfo02UL: (): ModernExtend => {
         const clusterName = "customClusterEwelink";
@@ -13727,6 +14199,9 @@ export const definitions: DefinitionWithExtend[] = [
                     temperatureCalibration: {name: "temperatureCalibration", ID: 0x2003, type: Zcl.DataType.INT16, write: true},
                     humidityCalibration: {name: "humidityCalibration", ID: 0x2004, type: Zcl.DataType.INT16, write: true},
                     remoteSensorData: {name: "remoteSensorData", ID: 0x601e, type: Zcl.DataType.ARRAY, write: true},
+                    customDisplayComponentConfig: {name: "customDisplayComponentConfig", ID: 0x202f, type: Zcl.DataType.ARRAY, write: true},
+                    memoPageText: {name: "memoPageText", ID: 0x2030, type: Zcl.DataType.ARRAY, write: true},
+                    screenCarouselConfig: {name: "screenCarouselConfig", ID: 0x2031, type: Zcl.DataType.ARRAY, write: true},
                     longitude: {name: "longitude", ID: 0x5016, type: Zcl.DataType.INT32, write: true, min: -2147483648},
                     latitude: {name: "latitude", ID: 0x5017, type: Zcl.DataType.INT32, write: true, min: -2147483648},
                 },
@@ -13751,6 +14226,9 @@ export const definitions: DefinitionWithExtend[] = [
             sonoffExtend.temperatureHumidityCalculatedValues(),
             sonoffExtend.remoteSensorData(),
             sonoffExtend.getCurrentWeatherInfo02UL(),
+            withConditionalExpose(sonoffExtend.customDisplayComponentConfig(), featureGates.snzb02ul_1_0_4_features),
+            withConditionalExpose(sonoffExtend.notePageText(), featureGates.snzb02ul_1_0_4_features),
+            withConditionalExpose(sonoffExtend.screenCarouselConfig(), featureGates.snzb02ul_1_0_4_features),
             m.bindCluster({cluster: "genPollCtrl", clusterType: "input"}),
             m.numeric<"customClusterEwelink", SonoffSnzb02ul>({
                 name: "comfort_temperature_min",
