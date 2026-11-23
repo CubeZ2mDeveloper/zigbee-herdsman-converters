@@ -1055,6 +1055,7 @@ export function windSpeed(args: Partial<NumericArgs<"msWindSpeed">> = {}) {
 }
 
 export interface OccupancyArgs {
+    description?: string;
     pirConfig?: ("otu_delay" | "uto_delay" | "uto_threshold")[];
     ultrasonicConfig?: ("otu_delay" | "uto_delay" | "uto_threshold")[];
     contactConfig?: ("otu_delay" | "uto_delay" | "uto_threshold")[];
@@ -1064,6 +1065,7 @@ export interface OccupancyArgs {
 }
 export function occupancy(args: OccupancyArgs = {}): ModernExtend {
     const {
+        description,
         reporting = true,
         reportingConfig = {min: "MIN", max: "1_HOUR", change: 0},
         pirConfig = undefined,
@@ -1072,7 +1074,11 @@ export function occupancy(args: OccupancyArgs = {}): ModernExtend {
         endpointNames = undefined,
     } = args;
 
-    const exposes: (Expose | DefinitionExposesFunction)[] = exposeEndpoints(e.occupancy().withAccess(ea.STATE_GET), endpointNames);
+    const occupancyExpose = e.occupancy().withAccess(ea.STATE_GET);
+    if (description !== undefined) {
+        occupancyExpose.withDescription(description);
+    }
+    const exposes: (Expose | DefinitionExposesFunction)[] = exposeEndpoints(occupancyExpose, endpointNames);
 
     const fromZigbee: Fz.Converter<"msOccupancySensing">[] = [
         {

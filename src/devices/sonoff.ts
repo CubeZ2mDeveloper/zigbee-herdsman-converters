@@ -513,8 +513,6 @@ const sonoffTrvzbtScheduleDays = ["sunday", "monday", "tuesday", "wednesday", "t
 type SonoffTrvzbtScheduleDayName = (typeof sonoffTrvzbtScheduleDays)[number];
 type SonoffTrvzbtScheduleTransition = {transitionTime: number; heatSetpoint: number};
 const sonoffTrvzbtTargetTemperatureRange = {min: 5, max: 30, step: 0.5};
-const sonoffHolidayModeDescription =
-    "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.";
 const sonoffTrvzbtScheduleGroupLookup = {"1": 0, "2": 1, "3": 2} as const;
 type SonoffTrvzbtSchedulePublicGroup = keyof typeof sonoffTrvzbtScheduleGroupLookup;
 const sonoffTrvzbtScheduleGroupInternalRange = {min: 0, max: 2};
@@ -11287,7 +11285,8 @@ export const definitions: DefinitionWithExtend[] = [
                     cluster: "customClusterEwelink",
                     attribute: "holidayEnable",
                     entityCategory: "config",
-                    description: sonoffHolidayModeDescription,
+                    description:
+                        "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.",
                     valueOn: [true, 0x01],
                     valueOff: [false, 0x00],
                 }),
@@ -11367,17 +11366,11 @@ export const definitions: DefinitionWithExtend[] = [
                 "Period when radar detection does not wake the screen automatically.",
             ),
             withConditionalExpose(
-                {
-                    ...m.occupancy({reporting: false}),
-                    exposes: [
-                        e
-                            .occupancy()
-                            .withAccess(ea.STATE_GET)
-                            .withDescription(
-                                "Shows Occupied when the thermostat’s radar detects someone within range. Presence detection is paused when radar detection is disabled or Radar Do Not Disturb is active.",
-                            ),
-                    ],
-                },
+                m.occupancy({
+                    reporting: false,
+                    description:
+                        "Shows Occupied when the thermostat’s radar detects someone within range. Presence detection is paused when radar detection is disabled or Radar Do Not Disturb is active.",
+                }),
                 featureGates.tpwgzba_support_occupancy,
             ),
             withConditionalExpose(
@@ -11450,11 +11443,36 @@ export const definitions: DefinitionWithExtend[] = [
             await reporting.bind(endpoint, coordinatorEndpoint, ["hvacThermostat"]);
             // await reporting.thermostatTemperature(endpoint);
             await endpoint.read("hvacThermostat", ["localTemperatureCalibration"]);
-            const customAttributes = [
-                0x0000, 0x0029, 0x6000, 0x6002, 0x6014, 0x6015, 0x6016, 0x601d, 0x601f, 0x6020, 0x6021, 0x6022, 0x6023, 0x6024, 0x6025, 0x6026,
-                0x6027, 0x6028, 0x601e, 0x6031, 0x6032, 0x6034, 0x6035, 0x602d, 0x602e, 0x602b, 0x602c,
+            const customAttributes: (keyof SonoffTpWgzba["attributes"])[] = [
+                "childLock",
+                "btPairingBroadcastReq",
+                "openWindow",
+                "frostProtectionTemperature",
+                "temporaryMode",
+                "temporaryModeTime",
+                "temporaryModeTemp",
+                "weeklyScheduleActiveNum",
+                "temperatureControlThreshold",
+                "radarSensitivityLevel",
+                "radarDoNotDisturbEnable",
+                "radarDoNotDisturbPeriod",
+                "screenWorkingBrightness",
+                "screenStandbyBrightness",
+                "screenNightStandbyBrightness",
+                "screenNightModeEnable",
+                "screenNightModePeriod",
+                "relayOutputType",
+                "remoteAttributeLinkage",
+                "currentNtcTemperature",
+                "overheatProtectionTemperature",
+                "overheatProtectionEnable",
+                "radarEnable",
+                "antiStuckEnable",
+                "antiStuckSchedule",
+                "holidayEnable",
+                "holidaySchedule",
             ];
-            await readAttributesInBatches(0xfc11, customAttributes, endpoint);
+            await readAttributesInBatches<"customClusterEwelink", SonoffTpWgzba>("customClusterEwelink", customAttributes, endpoint);
         },
     },
     {
@@ -11578,8 +11596,6 @@ export const definitions: DefinitionWithExtend[] = [
             m.enumLookup<"customClusterEwelink", SonoffTrvzbt>({
                 name: "device_work_mode",
                 lookup: {
-                    single_fire: 0x00,
-                    zero_fire: 0x01,
                     frost_protection: 0x02,
                     manual: 0x03,
                     schedule: 0x04,
@@ -11733,13 +11749,12 @@ export const definitions: DefinitionWithExtend[] = [
                 access: "STATE_GET",
                 fzConvert: (model, msg) => {
                     const opening = msg.data.valveOpeningRatio;
-                    if (opening === undefined) {
+                    // Herdsman decodes the reserved UINT8 value 0xff as NaN.
+                    if (typeof opening !== "number" || Number.isNaN(opening) || opening < 0 || opening > 100) {
                         return;
                     }
 
-                    // Herdsman decodes the reserved UINT8 value 0xff as NaN.
-                    const validOpening = opening !== null && opening >= 0 && opening <= 100;
-                    return {valve_opening: validOpening ? opening : null};
+                    return {valve_opening: opening};
                 },
             }),
             m.binary<"customClusterEwelink", SonoffTrvzbt>({
@@ -11758,7 +11773,8 @@ export const definitions: DefinitionWithExtend[] = [
                 cluster: "customClusterEwelink",
                 attribute: "holidayEnable",
                 entityCategory: "config",
-                description: sonoffHolidayModeDescription,
+                description:
+                    "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.",
                 valueOn: [true, 0x01],
                 valueOff: [false, 0x00],
             }),
@@ -11769,14 +11785,36 @@ export const definitions: DefinitionWithExtend[] = [
         ota: true,
         configure: async (device) => {
             const endpoint = device.getEndpoint(1);
-            const customAttributes = [
-                0x0000, 0x0010, 0x0021, 0x6000, 0x6002, 0x6003, 0x6004, 0x6005, 0x6006, 0x6007, 0x600b, 0x600c, 0x6011, 0x6013, 0x6014, 0x6016,
-                0x601c, 0x601d, 0x601e, 0x6033, 0x6037, 0x6027, 0x602b, 0x602c,
+            const customAttributes: (keyof SonoffTrvzbt["attributes"])[] = [
+                "childLock",
+                "faultCode",
+                "screenDirection",
+                "openWindow",
+                "frostProtectionTemperature",
+                "idleSteps",
+                "closingSteps",
+                "valveOpeningLimitVoltage",
+                "valveClosingLimitVoltage",
+                "valveMotorRunningVoltage",
+                "valveOpeningDegree",
+                "valveClosingDegree",
+                "temperatureTriggerOfValveOpening",
+                "temperatureControlMode",
+                "temporaryMode",
+                "temporaryModeTemp",
+                "lowBatteryValveState",
+                "weeklyScheduleActiveNum",
+                "remoteAttributeLinkage",
+                "heatPercentageHour",
+                "motorTravelCalibrationStatus",
+                "screenNightModePeriod",
+                "holidayEnable",
+                "holidaySchedule",
             ];
             if (featureGates.trvzbl_support_valve_direct_control(device)) {
-                customAttributes.push(0x6041);
+                customAttributes.push("valveDirectControl");
             }
-            await readAttributesInBatches(0xfc11, customAttributes, endpoint);
+            await readAttributesInBatches<"customClusterEwelink", SonoffTrvzbt>("customClusterEwelink", customAttributes, endpoint);
         },
     },
     {
