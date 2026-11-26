@@ -1518,7 +1518,7 @@ const featureGates = {
     // Unknown firmware retains the legacy display controls, matching the original firmwareAtLeast fallback.
     snzb02dr2_legacy_remote_source: (device: Zh.Device): boolean => !featureGates.snzb02dr2_support_remote_source(device),
     snzb02dr2_support_remote_source: firmwareSupportFeaturesVersion("1.0.5", "higher"),
-    // Expose multiple remote temperature inputs and valve direct control. Also read the direct control attribute during setup.
+    // Gate multiple remote temperature inputs, valve direct control, night mode, and holiday mode.
     trvzbl_support_iteration: firmwareSupportFeaturesVersion("1.0.5", "higher", {modelID: "TRV-ZBL"}),
     // Expose the legacy single remote temperature input below the same firmware threshold.
     trvzbl_support_single_temperature: firmwareSupportFeaturesVersion("1.0.5", "lower", {modelID: "TRV-ZBL"}),
@@ -1935,7 +1935,7 @@ const sonoffExtend = {
                 .withLabel("Valve direct control duration")
                 .withCategory("config")
                 .withValueMin(0)
-                .withValueMax(1440)
+                .withValueMax(1439)
                 .withValueStep(1)
                 .withUnit("min")
                 .withDescription(
@@ -11277,17 +11277,20 @@ export const definitions: DefinitionWithExtend[] = [
             sonoffExtend.tpWgzbaTemperatureHysteresis(),
             withConditionalExpose(sonoffExtend.tpWgzbaAntiStuck(), featureGates.tpwgzba_support_iteration),
             withConditionalExpose(
-                m.binary<"customClusterEwelink", SonoffTpWgzba>({
-                    name: "holiday_enabled",
-                    label: "Holiday mode",
-                    cluster: "customClusterEwelink",
-                    attribute: "holidayEnable",
-                    entityCategory: "config",
-                    description:
-                        "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.",
-                    valueOn: [true, 0x01],
-                    valueOff: [false, 0x00],
-                }),
+                {
+                    ...m.binary<"customClusterEwelink", SonoffTpWgzba>({
+                        name: "holiday_enabled",
+                        label: "Holiday mode",
+                        cluster: "customClusterEwelink",
+                        attribute: "holidayEnable",
+                        entityCategory: "config",
+                        description:
+                            "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.",
+                        valueOn: [true, 0x01],
+                        valueOff: [false, 0x00],
+                    }),
+                    configure: [],
+                },
                 featureGates.tpwgzba_support_iteration,
             ),
             withConditionalExpose(sonoffExtend.holidaySchedule({canSelectHeatingBehavior: false}), featureGates.tpwgzba_support_iteration),
@@ -11327,18 +11330,21 @@ export const definitions: DefinitionWithExtend[] = [
                 valueOff: ["disable", 0x00],
             }),
             withConditionalExpose(
-                m.numeric({
-                    name: "occupancy_timeout",
-                    label: "Occupancy hold time",
-                    cluster: "msOccupancySensing",
-                    attribute: "ultrasonicOToUDelay",
-                    entityCategory: "config",
-                    description:
-                        "Set how many seconds the status stays Occupied after the radar stops detecting anyone. If you turn off radar detection while the status is Occupied, it changes to Clear once the hold time expires.",
-                    valueMin: 10,
-                    valueMax: 3600,
-                    unit: "s",
-                }),
+                {
+                    ...m.numeric({
+                        name: "occupancy_timeout",
+                        label: "Occupancy hold time",
+                        cluster: "msOccupancySensing",
+                        attribute: "ultrasonicOToUDelay",
+                        entityCategory: "config",
+                        description:
+                            "Set how many seconds the status stays Occupied after the radar stops detecting anyone. If you turn off radar detection while the status is Occupied, it changes to Clear once the hold time expires.",
+                        valueMin: 10,
+                        valueMax: 3600,
+                        unit: "s",
+                    }),
+                    configure: [],
+                },
                 featureGates.tpwgzba_support_iteration,
             ),
             m.enumLookup<"customClusterEwelink", SonoffTpWgzba>({
@@ -11372,15 +11378,18 @@ export const definitions: DefinitionWithExtend[] = [
                 featureGates.tpwgzba_support_iteration,
             ),
             withConditionalExpose(
-                m.enumLookup<"customClusterEwelink", SonoffTpWgzba>({
-                    name: "screen_temperature_display",
-                    lookup: {ambient_temperature: 0x00, target_temperature: 0x01},
-                    cluster: "customClusterEwelink",
-                    attribute: "defaultDisplayPage",
-                    entityCategory: "config",
-                    description:
-                        "Choose whether the screen shows the room temperature or the set temperature. The screen shows the room temperature by default. Press the thermostat button twice to switch between the two.",
-                }),
+                {
+                    ...m.enumLookup<"customClusterEwelink", SonoffTpWgzba>({
+                        name: "screen_temperature_display",
+                        lookup: {ambient_temperature: 0x00, target_temperature: 0x01},
+                        cluster: "customClusterEwelink",
+                        attribute: "defaultDisplayPage",
+                        entityCategory: "config",
+                        description:
+                            "Choose whether the screen shows the room temperature or the set temperature. The screen shows the room temperature by default. Press the thermostat button twice to switch between the two.",
+                    }),
+                    configure: [],
+                },
                 featureGates.tpwgzba_support_iteration,
             ),
             m.numeric<"customClusterEwelink", SonoffTpWgzba>({
@@ -11465,11 +11474,11 @@ export const definitions: DefinitionWithExtend[] = [
                 "overheatProtectionTemperature",
                 "overheatProtectionEnable",
                 "radarEnable",
-                "antiStuckEnable",
-                "antiStuckSchedule",
-                "holidayEnable",
-                "holidaySchedule",
             ];
+            if (featureGates.tpwgzba_support_iteration(device)) {
+                customAttributes.push("antiStuckEnable", "antiStuckSchedule", "holidayEnable", "holidaySchedule", "defaultDisplayPage");
+                await readAttributesInBatches("msOccupancySensing", ["ultrasonicOToUDelay"], endpoint);
+            }
             await readAttributesInBatches<"customClusterEwelink", SonoffTpWgzba>("customClusterEwelink", customAttributes, endpoint);
         },
     },
@@ -11755,28 +11764,44 @@ export const definitions: DefinitionWithExtend[] = [
                     return {valve_opening: opening};
                 },
             }),
-            m.binary<"customClusterEwelink", SonoffTrvzbt>({
-                name: "night_mode",
-                cluster: "customClusterEwelink",
-                attribute: "screenNightModeEnable",
-                entityCategory: "config",
-                description: "Reduce screen brightness during the scheduled period.",
-                valueOn: ["enable", 0x01],
-                valueOff: ["disable", 0x00],
-            }),
-            sonoffExtend.tpWgzbaTimePeriod("night_mode_period", "screenNightModePeriod", "Period during which night mode brightness is used."),
-            m.binary<"customClusterEwelink", SonoffTrvzbt>({
-                name: "holiday_enabled",
-                label: "Holiday mode",
-                cluster: "customClusterEwelink",
-                attribute: "holidayEnable",
-                entityCategory: "config",
-                description:
-                    "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.",
-                valueOn: [true, 0x01],
-                valueOff: [false, 0x00],
-            }),
-            sonoffExtend.holidaySchedule({canSelectHeatingBehavior: true}),
+            // The device configure function reads these switches only on supported firmware.
+            withConditionalExpose(
+                {
+                    ...m.binary<"customClusterEwelink", SonoffTrvzbt>({
+                        name: "night_mode",
+                        cluster: "customClusterEwelink",
+                        attribute: "screenNightModeEnable",
+                        entityCategory: "config",
+                        description: "Reduce screen brightness during the scheduled period.",
+                        valueOn: ["enable", 0x01],
+                        valueOff: ["disable", 0x00],
+                    }),
+                    configure: [],
+                },
+                featureGates.trvzbl_support_iteration,
+            ),
+            withConditionalExpose(
+                sonoffExtend.tpWgzbaTimePeriod("night_mode_period", "screenNightModePeriod", "Period during which night mode brightness is used."),
+                featureGates.trvzbl_support_iteration,
+            ),
+            withConditionalExpose(
+                {
+                    ...m.binary<"customClusterEwelink", SonoffTrvzbt>({
+                        name: "holiday_enabled",
+                        label: "Holiday mode",
+                        cluster: "customClusterEwelink",
+                        attribute: "holidayEnable",
+                        entityCategory: "config",
+                        description:
+                            "When enabled, the thermostat applies your holiday heating settings at the scheduled start time and resumes normal heating control at the scheduled end time. The thermostat screen displays HO while holiday mode is active.",
+                        valueOn: [true, 0x01],
+                        valueOff: [false, 0x00],
+                    }),
+                    configure: [],
+                },
+                featureGates.trvzbl_support_iteration,
+            ),
+            withConditionalExpose(sonoffExtend.holidaySchedule({canSelectHeatingBehavior: true}), featureGates.trvzbl_support_iteration),
             withConditionalExpose(sonoffExtend.valveControl(), featureGates.trvzbl_support_iteration),
             sonoffExtend.motorTravelCalibrationStatus(),
         ],
@@ -11805,12 +11830,9 @@ export const definitions: DefinitionWithExtend[] = [
                 "remoteAttributeLinkage",
                 "heatPercentageHour",
                 "motorTravelCalibrationStatus",
-                "screenNightModePeriod",
-                "holidayEnable",
-                "holidaySchedule",
             ];
             if (featureGates.trvzbl_support_iteration(device)) {
-                customAttributes.push("valveDirectControl");
+                customAttributes.push("screenNightModePeriod", "holidayEnable", "holidaySchedule", "valveDirectControl", "screenNightModeEnable");
             }
             await readAttributesInBatches<"customClusterEwelink", SonoffTrvzbt>("customClusterEwelink", customAttributes, endpoint);
         },
